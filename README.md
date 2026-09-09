@@ -41,6 +41,26 @@ the upstream sample avatars and some gallery images still use remote URLs.
 
 ## What the PSX layer does
 
+### Optional microphone assist
+
+In Settings, choose **Microphone assist → Enable microphone**. Capture is off
+on every page load and must be enabled for each session. The camera keeps its
+vowel/rest/smile decisions; volume can reinforce a selected vowel. When a hand
+covers the face, volume drives a generic A mouth instead of holding the last
+vowel. This requires the face update loop and is not audio-only tracking.
+
+Reduce **Microphone sensitivity** if background noise opens the mouth. This is
+an amplitude detector, not a speech or phoneme recognizer. It does not record,
+upload or play back the audio, and calibration/preview bypass the assist.
+
+The added analysis reads one reused 512-sample buffer at most 20 times per
+second, from the existing face loop. No microphone graph or analysis runs while
+disabled. Disabling, resetting settings or leaving the page releases capture;
+cancelled permission requests also release any stream granted afterward.
+`PSX.mic()` reports state, level, read count and average analysis time in ms.
+That timing excludes the browser's audio capture cost: total performance still
+needs measurement on the target Raspberry Pi.
+
 `docs/psx.js` loads as a plain script **before** the app bundle and exposes `window.PSX`.
 The bundle calls back into it at a handful of patched call sites, so nothing here
 touches the app's own source tree (this repo only ships the built bundle).

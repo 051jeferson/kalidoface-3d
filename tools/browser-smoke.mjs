@@ -13,8 +13,18 @@ await once(server, 'listening');
 const base = `http://127.0.0.1:${server.address().port}`;
 let browser;
 try {
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  await context.grantPermissions(['microphone']);
+  await context.addInitScript(() => {
+    const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    window.testMicStreams = [];
+    navigator.mediaDevices.getUserMedia = async constraints => {
+      const stream = await original(constraints);
+      if (constraints.audio && !constraints.video) window.testMicStreams.push(stream);
+      return stream;
+    };
+  });
   const page = await context.newPage();
   const errors = [], remote = new Set();
   page.on('pageerror', error => errors.push(error.message));
@@ -106,9 +116,35 @@ try {
   await language.waitFor();
   await language.selectOption('1');
   assert.equal(await page.locator('html').getAttribute('lang'), 'pt-BR');
+  assert.equal(await page.locator('[data-psx-mic]').textContent(), 'Ativar microfone');
   await language.selectOption('0');
   assert.equal(await page.locator('html').getAttribute('lang'), 'en');
   assert.ok(await page.locator('input[name="psx-threshold"]').getAttribute('aria-valuetext'));
+  assert.equal(await page.evaluate(() => testMicStreams.length), 0, 'microphone stays off on startup');
+  await page.getByRole('button', { name: 'Enable microphone', exact: true }).click();
+  await page.waitForFunction(() => PSX.mic().state !== 'requesting');
+  const micState = await page.evaluate(() => PSX.mic());
+  assert.equal(micState.state, 'active', JSON.stringify(micState));
+  const audioResult = await page.evaluate(async () => {
+    const values = {};
+    const vrm = { blendShapeProxy: {
+      setValue: (k, v) => { values[k] = v; }, getValue: k => values[k] || 0
+    } };
+    const face = { mouth: { x: 0.3, y: 0.5, shape: {} } };
+    const start = performance.now();
+    for (let i = 0; i < 25; i++) {
+      PSX.face(vrm, face);
+      await new Promise(resolve => setTimeout(resolve, 55));
+    }
+    return { ...PSX.mic(), elapsed: performance.now() - start };
+  });
+  assert.ok(audioResult.reads > 0 && audioResult.reads <= 25);
+  assert.ok(audioResult.reads <= Math.ceil(audioResult.elapsed / 50));
+  console.log('Real Web Audio sampling (synthetic microphone):', JSON.stringify(audioResult));
+  await page.getByRole('button', { name: 'Disable microphone', exact: true }).click();
+  assert.equal(await page.evaluate(() => PSX.mic().state), 'off');
+  assert.equal(await page.evaluate(() => testMicStreams.every(s => s.getTracks().every(t => t.readyState === 'ended'))), true,
+    'disabling microphone stops its real browser track');
   await page.locator('[data-text="Backgrounds"]').click();
   const green = page.getByRole('button', { name: 'Chroma green', exact: true });
   await green.waitFor();
@@ -132,7 +168,7 @@ try {
   await page.waitForFunction(() => window.PSX && !window.PSX.stub && document.querySelector('canvas'));
   assert.equal(await page.evaluate(() => document.fonts.check('16px Kalicon')), true);
   assert.deepEqual(errors, [], 'no uncaught application errors');
-  console.log('Browser smoke passed: startup, hooks, real bone transforms, contact poses, language, keyboard colours, reduced motion, narrow viewport, first-visit offline/PWA shell.');
+  console.log('Browser smoke passed: startup, hooks, real bone transforms, contact poses, microphone lifecycle, language, keyboard colours, reduced motion, narrow viewport, first-visit offline/PWA shell.');
 } finally {
   if (browser) await browser.close();
   server.closeAllConnections();

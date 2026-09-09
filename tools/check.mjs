@@ -5,7 +5,7 @@ const cwd = fileURLToPath(new URL('../', import.meta.url));
 for (const args of [
   ['--check', 'docs/psx.js'], ['--check', 'docs/sw.js'],
   ['tools/patch.mjs', '--check'], ['tools/fetch-vendor.mjs', '--check'],
-  ['tools/test-motion.mjs'], ['tools/test-system.mjs']
+  ['tools/test-motion.mjs'], ['tools/test-system.mjs'], ['tools/test-audio.mjs']
 ]) {
   const result = spawnSync(process.execPath, args, { cwd, stdio: 'inherit' });
   if (result.error || result.status !== 0) {

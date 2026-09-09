@@ -166,6 +166,12 @@ Never edit `docs/assets/index.*.js` by hand. After a Glitch/Vite rebuild that ch
 
 ## Do not
 
+- Microphone assist is session-only and opt-in. Only `micSensitivity` persists.
+  Sample the fixed 512-float buffer from the face loop at most 20 Hz; never add
+  a second polling loop. The optional audio fallback during `faceOcc` overrides
+  vowel output only, without modifying the camera's `lastViseme` or recordings.
+  Permission cancellation must stop a stream that resolves after cancellation.
+
 - Restore `src/` as the place to work. The fork is `docs/psx.js`.
 - Commit an unpatched bundle. If `docs/index.html`'s module `src` hash changes, run the patcher before considering the change done.
 - Dispatch pin events in a loop. `PIN_TRIES` is 3 on purpose: a value the app rejects would re-render forever.

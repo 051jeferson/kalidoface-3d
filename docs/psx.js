@@ -88,6 +88,7 @@
     holdMs: 80,
     // pre-threshold multiplier, so quiet talking still registers
     mouthGain: 1,
+    micSensitivity: 1,
 
     // --- eyes ----------------------------------------------------------
     // One number: how shut the eye has to look before it counts as shut.
@@ -314,6 +315,7 @@
     hysteresis: { min: 0, max: 0.5 },
     holdMs: { min: 0, max: 400 },
     mouthGain: { min: 0.25, max: 3 },
+    micSensitivity: { min: 0.5, max: 4 },
     eyeShutAt: { min: 0.05, max: 0.95 },
     eyeFurrowLift: { min: 0, max: 0.6 },
     browGain: { min: 0.25, max: 4 },
@@ -473,6 +475,7 @@
   }
 
   function resetSettings() {
+    stopMic();
     if (calRun) stopCalibration(T('Calibration cancelled.'));
     try { localStorage.removeItem(STORE_KEY); } catch (e) {}
     var fresh = load();
@@ -3649,7 +3652,126 @@
     return { key: best, d: bestD, margin: Math.max(second - bestD, 0) };
   }
 
+  // Capture is session-only: opening a saved profile never opens a microphone.
+  // One fixed buffer, sampled from the existing face loop at most 20 times/s.
+  // No frequency analysis, audio playback, worker or independent polling loop.
+  var mic = { state: 'off', epoch: 0, ctx: null, stream: null, track: null, source: null,
+    analyser: null, buffer: null, at: -Infinity, level: 0, reads: 0, ms: 0, error: null };
+  var micButton = null, micNote = null;
+
+  function syncMicUi() {
+    if (micButton) {
+      micButton.textContent = T(mic.state === 'requesting' ? 'Cancel microphone'
+        : mic.state === 'active' ? 'Disable microphone' : 'Enable microphone');
+      micButton.setAttribute('aria-pressed', String(mic.state === 'active'));
+    }
+    if (micNote) micNote.textContent = T('mic.' + mic.state);
+  }
+
+  function stopMic(state) {
+    mic.epoch++;
+    if (mic.stream) mic.stream.getTracks().forEach(function (track) { track.stop(); });
+    if (mic.source) { try { mic.source.disconnect(); } catch (e) {} }
+    if (mic.ctx) { try { mic.ctx.close().catch(function () {}); } catch (e) {} }
+    mic.stream = mic.track = mic.source = mic.ctx = mic.analyser = mic.buffer = null;
+    mic.level = 0; mic.at = -Infinity;
+    mic.state = state || 'off';
+    syncMicUi();
+  }
+
+  function startMic() {
+    if (mic.state === 'active' || mic.state === 'requesting') return;
+    var media = navigator.mediaDevices;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!media || !media.getUserMedia || !AC) { stopMic('unavailable'); return; }
+    var epoch = ++mic.epoch;
+    mic.state = 'requesting'; mic.reads = 0; mic.ms = 0; mic.error = null;
+    syncMicUi();
+    function fail(error) {
+      if (epoch !== mic.epoch) return;
+      mic.error = error ? String(error.name) + ': ' + String(error.message || '') : 'Audio unavailable';
+      stopMic(error && error.name === 'NotAllowedError' ? 'denied' : 'unavailable');
+    }
+    try {
+      // Resume inside the button gesture; permission may take much longer.
+      mic.ctx = new AC();
+      mic.ctx.resume().catch(fail);
+      return media.getUserMedia({ video: false, audio: { channelCount: 1,
+        echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      }).then(function (stream) {
+        // A cancelled permission request can still resolve with a live stream.
+        if (epoch !== mic.epoch) {
+          stream.getTracks().forEach(function (track) { track.stop(); });
+          return;
+        }
+        mic.stream = stream;
+        var tracks = stream.getAudioTracks();
+        if (!tracks.length || tracks[0].readyState === 'ended') throw new Error('No audio track');
+        mic.track = tracks[0];
+        tracks[0].addEventListener('ended', function () {
+          if (epoch === mic.epoch) stopMic('unavailable');
+        });
+        mic.analyser = mic.ctx.createAnalyser();
+        mic.analyser.fftSize = 512;
+        mic.buffer = new Float32Array(512);
+        mic.source = mic.ctx.createMediaStreamSource(stream);
+        mic.source.connect(mic.analyser);
+        mic.state = 'active';
+        syncMicUi();
+      }).catch(fail);
+    } catch (error) { fail(error); }
+  }
+
+  function micLevel() {
+    if (mic.state !== 'active') return 0;
+    if (mic.ctx.state !== 'running' || mic.track.muted) {
+      mic.level = 0;
+      return 0;
+    }
+    var t = now();
+    if (t - mic.at < 50) return mic.level;
+    mic.at = t;
+    mic.analyser.getFloatTimeDomainData(mic.buffer);
+    var sum = 0, squares = 0;
+    for (var i = 0; i < mic.buffer.length; i++) {
+      var v = mic.buffer[i]; sum += v; squares += v * v;
+    }
+    // Subtract DC offset so a constant device bias cannot open the mouth.
+    var mean = sum / mic.buffer.length;
+    var rms = Math.sqrt(Math.max(0, squares / mic.buffer.length - mean * mean));
+    var level = clamp((rms * cfg.micSensitivity - 0.012) / 0.08, 0, 1);
+    mic.level += (level - mic.level) * (level > mic.level ? 0.8 : 0.6);
+    if (mic.level < 0.01) mic.level = 0;
+    mic.reads++; mic.ms += now() - t;
+    return mic.level;
+  }
+
+  function micInfo() {
+    return { state: mic.state, error: mic.error, level: mic.level, reads: mic.reads,
+      maxHz: 20, samplesPerRead: 512, analysisMs: mic.reads ? mic.ms / mic.reads : 0 };
+  }
+
+  window.addEventListener('pagehide', function () { stopMic(); });
+
   function driveVisemes(vrm, rig) {
+    driveCameraVisemes(vrm, rig);
+    if (mic.state !== 'active' || calRun || cfg.preview) return;
+    var proxy = vrm && vrm.blendShapeProxy;
+    if (!proxy || !rig || !rig.mouth) return;
+    var level = micLevel();
+    // A visible rest or smile remains the camera's decision. Audio cannot
+    // identify vowels; only an occluded mouth falls back to a generic A cell.
+    if (!faceOcc && (!lastViseme.key || mouthSays > 0)) return;
+    var key = faceOcc ? 'a' : lastViseme.key;
+    var weight = faceOcc ? level : Math.max(lastViseme.w, level);
+    for (var k in MOUTH_KEYS) {
+      try { proxy.setValue(k, k === key ? weight : 0); } catch (e) {}
+    }
+    // Do not write audio into lastViseme: the camera's held pose must survive
+    // disabling audio, and silence must not replace the learned vowel state.
+  }
+
+  function driveCameraVisemes(vrm, rig) {
     var proxy = vrm && vrm.blendShapeProxy;
     var mouth = rig && rig.mouth;
     if (!proxy || !mouth) return;
@@ -5776,6 +5898,16 @@
   // beside it is evaluated and thrown away.
 
   var PT = {
+    'Microphone assist': 'Apoio do microfone',
+    'Microphone sensitivity': 'Sensibilidade do microfone',
+    'Enable microphone': 'Ativar microfone',
+    'Disable microphone': 'Desativar microfone',
+    'Cancel microphone': 'Cancelar microfone',
+    'mic.off': 'Desligado. Ative para reforçar a boca pela voz e animá-la quando a mão cobrir o rosto. A câmera continua escolhendo as vogais e os sorrisos.',
+    'mic.requesting': 'Aguardando permissão do microfone no navegador…',
+    'mic.active': 'Microfone ativo nesta sessão. Se a boca reagir ao ruído, reduza a sensibilidade. O áudio é processado aqui, sem gravação ou envio.',
+    'mic.denied': 'Permissão negada. Libere o microfone nas permissões do site e tente novamente.',
+    'mic.unavailable': 'Microfone indisponível. Confira a conexão e o acesso ao dispositivo, depois tente novamente.',
     // --- Effects / render ---
     'PSX Render': 'Render PSX',
     'Render scale': 'Escala de render',
@@ -6162,6 +6294,16 @@
   };
 
   var EN = {
+    'Microphone assist': 'Microphone assist',
+    'Microphone sensitivity': 'Microphone sensitivity',
+    'Enable microphone': 'Enable microphone',
+    'Disable microphone': 'Disable microphone',
+    'Cancel microphone': 'Cancel microphone',
+    'mic.off': 'Off. Enable to reinforce the mouth with your voice and animate it when a hand covers your face. The camera still chooses vowels and smiles.',
+    'mic.requesting': 'Waiting for microphone permission in the browser…',
+    'mic.active': 'Microphone active for this session. Reduce sensitivity if noise moves the mouth. Audio is processed here, without recording or uploading.',
+    'mic.denied': 'Permission denied. Allow the microphone in site permissions and try again.',
+    'mic.unavailable': 'Microphone unavailable. Check the connection and device access, then try again.',
     'note.novoice': 'This browser has no speech voices installed, so the spoken ' +
       'prompts are silent - the beeps and the on-screen prompt still work. On ' +
       'Raspberry Pi OS, installing a speech engine gives Chromium a voice list.',
@@ -7341,6 +7483,25 @@
     }
     frag.appendChild(x);
 
+    var audio = card(T('Microphone assist'), STG);
+    micNote = el('div', STG, '');
+    micNote.style.cssText = 'width:100%;font-size:12px;line-height:1.5;text-align:left';
+    micNote.setAttribute('role', 'status');
+    audio.appendChild(micNote);
+    micButton = el('button', 'trigger ' + STG, '');
+    micButton.type = 'button';
+    micButton.setAttribute('data-psx-mic', '');
+    micButton.style.marginTop = '12px';
+    micButton.addEventListener('click', function () {
+      if (mic.state === 'active' || mic.state === 'requesting') stopMic();
+      else startMic();
+    });
+    audio.appendChild(micButton);
+    addRange(audio, 'micSensitivity', T('Microphone sensitivity'), 0.5, 4, 0.1,
+      function (v) { return v.toFixed(1) + 'x'; }, STG);
+    syncMicUi();
+    frag.appendChild(audio);
+
     // --- eyes ----------------------------------------------------------
     var ey = card(T('Eyes'), STG);
     var eyNote = el('div', STG, T('note.eyes'));
@@ -7975,7 +8136,7 @@
     // detached node being written to forever: syncCalUi would keep relabelling
     // the old button and the new one would never change.
     calEl = calMotionEl = calMouthEl = calBlinkEl = null;
-    readoutEl = eyeReadoutEl = importNoteEl = voiceNoteEl = null;
+    readoutEl = eyeReadoutEl = importNoteEl = voiceNoteEl = micButton = micNote = null;
     calBtn = calMotionBtn = calMouthBtn = calBlinkBtn = null;
     calCancelBtn = calMotionCancelBtn = calMouthCancelBtn = calBlinkCancelBtn = null;
     bgCard = null;
@@ -8295,6 +8456,7 @@
     arm: arm,
     armInfo: armInfo,
     perf: perfInfo,
+    mic: micInfo,
     bg: bg,
     bgDrop: bgDrop,
     guide: guide,
