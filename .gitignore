@@ -6,3 +6,4 @@ src
 utils
 archive
 _archive
+.audit/

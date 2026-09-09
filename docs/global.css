@@ -370,7 +370,7 @@ body.user-is-tabbing input:focus + container {
 
 @media only screen and (hover: none),
   screen and (pointer: none),
-  screen and (pointer: course) {
+  screen and (pointer: coarse) {
   .forceAnimate {
     animation: jiggle 0.4s 1;
     animation-timing-function: cubic-bezier(0.26, 0.3, 0.66, 0.65);
@@ -384,5 +384,23 @@ body.user-is-tabbing input:focus + container {
   }
   button.unavailable:active .fill {
     transform: scale(1);
+  }
+}
+
+.psx-injected button:focus-visible,
+.psx-injected select:focus-visible,
+.psx-injected input[type="range"]:focus-visible,
+.psx-injected summary:focus-visible,
+.psx-injected input[type="checkbox"]:focus-visible + container {
+  outline: 2px solid white;
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

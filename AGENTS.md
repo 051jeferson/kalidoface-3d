@@ -31,7 +31,7 @@ python -m http.server 5173 --bind 127.0.0.1 --directory docs
 # http://127.0.0.1:5173/
 ```
 
-Do **not** run `npm run dev` / `npm run build` / `vite`. Root `index.html` imports `./src/main.js`, which is not in the repo. A Vite build would overwrite `docs/` and drop the patched bundle.
+`npm run dev` / `npm start` now run `tools/serve.mjs` (Node 18+, no dependencies), serving `docs/` on the same address. `npm test`, `npm run check` and `npm run build` run verification only. Do **not** invoke `vite` directly: root `index.html` imports the missing `./src/main.js`, and a Vite build would overwrite `docs/` and drop the patched bundle.
 
 `node_modules` is not required to run or to edit `psx.js`.
 
@@ -43,9 +43,12 @@ node tools/patch.mjs --check   # exit 1 if any call site is missing
 
 node tools/fetch-vendor.mjs         # fetch anything missing from docs/vendor/
 node tools/fetch-vendor.mjs --check # exit 1 if a vendored file is missing
+node tools/check.mjs               # hooks, stub parity, syntax and regression tests
 ```
 
 In the running app console: `PSX.verify()` counts bundle call sites; `PSX.dump()` logs the loaded model.
+
+Optional browser checks: `node tools/browser-smoke.mjs <path-to-playwright/index.mjs>` uses an already installed Playwright package and its Chromium. It blocks external requests, tests the bundled Three.js with a synthetic rig, language switching, colour controls and narrow layouts. This is not a webcam or Raspberry Pi benchmark. Temporary video review artifacts belong in `.audit/` (ignored).
 
 ## Vendored assets
 
@@ -142,6 +145,12 @@ Never edit `docs/assets/index.*.js` by hand. After a Glitch/Vite rebuild that ch
 - Holistic reports the two hands separately and swaps them once they are close together (`handSwaps` counts the corrections - 25 in one session with the hands touching, 0 with them apart). Do not trust the labels; ask which pose wrist each hand is sitting on, in the video frame, with a margin so a tie does not flicker.
 - `vis()` answers whether a landmark may be used; `conf()` answers how far to believe it. Use `conf` wherever a reading is allowed to **undo** something. Note that Mediapipe reports `visibility` of 0.9+ for wrists that are behind the skull, so confidence alone will not detect that occlusion.
 - Debugging this rig without `PSX.armInfo()` is guesswork: seven hypotheses were tried against these symptoms and every one that held up came from a **new field in that readout**, none from reasoning about the code. Add the field first. It writes raw numbers into two objects made once - keep it allocation-free, since it runs twice a frame forever, and do the rounding in `armInfo`.
+
+- `armLenOk` counts each `poseSeq` once, including rejected readings. Render-rate retries must not warm the meter or exhaust its give-up counter. Image-only caches use `imgSeq`; contact readings that also use world coordinates key both sequences.
+- The palm angle is relative to a model's bind pose, not a measured anatomical pronation angle. `followRoll` follows the shortest angular delta across the atan2 seam; an absolute ±2.6 clamp invents a discontinuity for valid bind poses.
+- `contactReading` recovers the image-plane wrist from a directly detected hand near the face, retaining pose-world depth. Hand-local z has a different origin and must never substitute for world z. Waist contact uses torso proportions and is disabled for offscreen hips; prediction fades out during contact.
+- Capture bone rest quaternions in `registerModel`, before the stock rig writes them. Wrap the model's existing `dispose` to release PSX's registry, glTF and IK references. Do not keep disposed avatars in `models`.
+- Invalid imported calibrations preserve the current recording; reset/import cancels an active wizard. Old explicit finger settings are preserved; new profiles drive all fingers, which is necessary for an index-finger gesture.
 
 - Head-relative gestures are anchored on the head (`headAnchor`), not the shoulder. Scaling a wrist offset by arm length preserves the direction exactly, and on a big-headed short-armed model that direction is faithfully wrong - its face is at a much steeper elevation from its shoulder than a person's. Measure such things in head-heights, never arm-lengths; an arm-length yardstick hides the very error, which is how this was missed twice. "At the head" for a hand *in front of* the face has to be read in the **image**, not in world landmarks: that is the axis Mediapipe compresses to nothing, so a covering palm sits on the skull in 3D while the video shows it on the mouth. `imgHeadNear` / `sideHitsFace` are that reading. Do not run `armDepth` under 1 on the head-anchor offset — that gain is for the whole-arm mapping, and crushing it here is what put every covering hand off to the side. When this hand occludes the face, add a forward standoff along the chest; without it the IK has no point in front of the mouth to reach. `PSX.armInfo().imgNear` / `occ` / `stand` are how to debug it.
 - `armDepth` steers direction only now that the elbow angle sets distance, so a value under 1 no longer damps noise - it aims every toward-camera gesture off to the side. Default is 1; the adaptive filter does the damping. `armReach` above 1 overshoots on ordinary proportions for the same reason, and `REACH_STRAIGHTEN` caps how much of the person's bend it may take away.

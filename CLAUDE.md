@@ -64,8 +64,10 @@ node tools/fetch-vendor.mjs         # refill docs/vendor/ from the source CDNs
 node tools/fetch-vendor.mjs --check # exit 1 if a vendored file is missing
 ```
 
-Never run `npm run dev` / `npm run build` / `vite`. Root `index.html` imports the
-missing `./src/main.js`, and a Vite build overwrites `docs/` and drops the patches.
+`npm run dev` / `npm start` serve `docs/` with the dependency-free Node server.
+`npm run build` / `npm test` only verify the static site. Never invoke `vite`
+directly: root `index.html` imports missing `./src/main.js`, and Vite overwrites
+`docs/` and drops the patches. Node 18+ is required for the maintenance tools.
 `node_modules` is not needed to run or edit. There is no test suite; verification
 is `--check` plus `PSX.verify()` / `PSX.perf()` / `PSX.armInfo()` in the browser
 console.

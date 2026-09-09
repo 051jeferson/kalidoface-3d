@@ -1,0 +1,140 @@
+// Optional browser checks. Pass an installed Playwright package's index.mjs;
+// Playwright is a development tool, never a dependency of the static app.
+import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import { mkdir } from 'node:fs/promises';
+import { createSiteServer } from './serve.mjs';
+
+const { chromium } = await import(process.argv[2] ? pathToFileURL(process.argv[2]).href : 'playwright');
+const server = createSiteServer();
+server.listen(0, '127.0.0.1');
+await once(server, 'listening');
+const base = `http://127.0.0.1:${server.address().port}`;
+let browser;
+try {
+  browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await context.newPage();
+  const errors = [], remote = new Set();
+  page.on('pageerror', error => errors.push(error.message));
+  await context.route('**/*', route => {
+    const url = route.request().url();
+    if (url.startsWith(base + '/') || url.startsWith('data:') || url.startsWith('blob:')) return route.continue();
+    remote.add(url); return route.abort();
+  });
+  await page.goto(base, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => window.PSX && !window.PSX.stub && document.querySelector('canvas'));
+  assert.deepEqual(await page.evaluate(() => PSX.verify()), []);
+  console.log('Startup:', JSON.stringify({ errors, remote: [...remote] }));
+
+  // Real bundled three.js transforms, a synthetic rig with known dimensions.
+  // This checks the whole IK path, not a second implementation of its math.
+  const rigResult = await page.evaluate(async () => {
+    const mod = await import('./assets/vendor.832d142e.js');
+    const Group = mod.ae;
+    const bones = {}, root = new Group();
+    function bone(name, parent, x, y, z) {
+      const b = new Group(); b.name = name; b.position.set(x, y, z);
+      parent.add(b); bones[name] = b; return b;
+    }
+    const hips = bone('hips', root, 0, 0.9, 0);
+    const chest = bone('chest', hips, 0, 0.5, 0);
+    bone('head', chest, 0, 0.25, 0);
+    for (const side of ['right', 'left']) {
+      const sign = side === 'right' ? -1 : 1;
+      const u = bone(side + 'UpperArm', chest, sign * 0.2, 0, 0);
+      const l = bone(side + 'LowerArm', u, sign * 0.27, 0, 0);
+      const h = bone(side + 'Hand', l, sign * 0.24, 0, 0);
+      bone(side + 'MiddleProximal', h, sign * 0.08, 0, 0);
+      bone(side + 'IndexProximal', h, sign * 0.07, 0, 0.03);
+      bone(side + 'LittleProximal', h, sign * 0.065, 0, -0.03);
+    }
+    const vrm = { humanoid: { getBoneNode: name => bones[name] } };
+    const p = (x, y, z = 0) => ({ x, y, z, visibility: 1 });
+    const world = Array.from({ length: 33 }, () => p(0, 0));
+    world[11] = p(-0.2, -0.5); world[12] = p(0.2, -0.5);
+    world[23] = p(-0.15, 0); world[24] = p(0.15, 0);
+    world[7] = p(-0.08, -0.75); world[8] = p(0.08, -0.75);
+    world[0] = p(0, -0.75, -0.08);
+    world[13] = p(-0.35, -0.25); world[14] = p(0.35, -0.25);
+    world[15] = p(-0.15, -0.09); world[16] = p(0.15, -0.09);
+    const image = world.map(v => p(0.5 + v.x, 0.8 + v.y, v.z));
+    const cfg = { ...PSX.cfg };
+    Object.assign(PSX.cfg, { armIK: true, shoulder: 0, armReach: 1,
+      reachR: 1, reachL: 1, armDepth: 1, reachUp: 1, headAnchor: 1, twist: 1, predict: 0 });
+    const dummy = {};
+    function solve() {
+      PSX.pose(world, image, { Right: null, Left: null });
+      const success = PSX.arm(vrm, dummy, 'Right', false, true,
+        bones.rightUpperArm, bones.rightLowerArm, bones.rightHand);
+      const out = new mod.V(); bones.rightHand.getWorldPosition(out);
+      return { success, position: { x: out.x, y: out.y, z: out.z }, debug: PSX.armInfo().right };
+    }
+    const waist = solve();
+    world[15] = p(-0.08, -0.74, -0.05); image[15] = p(0.42, 0.06, -0.05);
+    world[13] = p(-0.43, -0.5); image[13] = p(0.07, 0.3);
+    const head = solve();
+    world[15] = p(-0.15, -0.09, -0.05); world[15].visibility = 0.1;
+    image[15] = p(0.35, 0.71, -0.05); image[15].visibility = 0.1;
+    const hand = Array.from({ length: 21 }, () => p(0.49, 0.12, 0));
+    hand[5] = p(0.47, 0.075, -0.01); hand[9] = p(0.49, 0.07, -0.01);
+    hand[17] = p(0.515, 0.085, -0.01);
+    PSX.pose(world, image, { Right: hand, Left: null });
+    const recovered = PSX.arm(vrm, dummy, 'Right', false, true,
+      bones.rightUpperArm, bones.rightLowerArm, bones.rightHand);
+    const recovery = { success: recovered, debug: PSX.armInfo().right };
+    const start = performance.now();
+    for (let i = 0; i < 2000; i++) {
+      PSX.arm(vrm, dummy, 'Right', false, true, bones.rightUpperArm, bones.rightLowerArm, bones.rightHand);
+    }
+    const msPerArm = (performance.now() - start) / 2000;
+    Object.assign(PSX.cfg, cfg);
+    return { waist, head, recovery, msPerArm };
+  });
+  assert.ok(rigResult.waist.success && rigResult.head.success, 'both contact poses must solve');
+  assert.ok(rigResult.waist.debug.waist > 0.9);
+  assert.ok(rigResult.head.debug.anchor > 0.9);
+  assert.ok(Math.abs(rigResult.waist.position.y - 0.99) < 0.015, 'wrist reaches the model waist');
+  assert.ok(rigResult.head.position.y > 1.55, 'wrist reaches the model head');
+  assert.ok(Object.values(rigResult.head.position).every(Number.isFinite));
+  assert.ok(rigResult.recovery.success);
+  assert.equal(rigResult.recovery.debug.wristSource, 'hand image');
+  console.log('Bundled three.js IK:', JSON.stringify(rigResult));
+  await page.locator('[data-text="Settings"]').click();
+  const language = page.locator('select[name="psx-lang"]');
+  await language.waitFor();
+  await language.selectOption('1');
+  assert.equal(await page.locator('html').getAttribute('lang'), 'pt-BR');
+  await language.selectOption('0');
+  assert.equal(await page.locator('html').getAttribute('lang'), 'en');
+  assert.ok(await page.locator('input[name="psx-threshold"]').getAttribute('aria-valuetext'));
+  await page.locator('[data-text="Backgrounds"]').click();
+  const green = page.getByRole('button', { name: 'Chroma green', exact: true });
+  await green.waitFor();
+  await green.focus();
+  await page.keyboard.press('Enter');
+  assert.equal(await green.getAttribute('aria-pressed'), 'true');
+  assert.equal(await green.evaluate(n => n === document.activeElement), true, 'swatch rebuild keeps keyboard focus');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  assert.equal(await green.evaluate(n => getComputedStyle(n).transitionDuration), '1e-05s');
+
+  for (const width of [390, 1280]) {
+    await page.setViewportSize({ width, height: 800 });
+    const metrics = await page.evaluate(() => ({ width: innerWidth, scroll: document.documentElement.scrollWidth }));
+    assert.ok(metrics.scroll <= metrics.width + 1, `horizontal overflow at ${width}px`);
+    await mkdir(new URL('../.audit/', import.meta.url), { recursive: true });
+    await page.screenshot({ path: fileURLToPath(new URL(`../.audit/browser-${width}.png`, import.meta.url)) });
+  }
+  await page.waitForFunction(() => !!navigator.serviceWorker.controller);
+  await context.setOffline(true);
+  await page.goto(base + '/?source=pwa', { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => window.PSX && !window.PSX.stub && document.querySelector('canvas'));
+  assert.equal(await page.evaluate(() => document.fonts.check('16px Kalicon')), true);
+  assert.deepEqual(errors, [], 'no uncaught application errors');
+  console.log('Browser smoke passed: startup, hooks, real bone transforms, contact poses, language, keyboard colours, reduced motion, narrow viewport, first-visit offline/PWA shell.');
+} finally {
+  if (browser) await browser.close();
+  server.closeAllConnections();
+  await new Promise(resolve => server.close(resolve));
+}

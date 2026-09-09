@@ -7,15 +7,16 @@
   "author": "",
   "license": "ISC",
   "engines": {
-    "node": "14.x"
+    "node": ">=18"
   },
   "type": "module",
   "scripts": {
-    "clean": "rm dist/bundle.js",
-    "dev": "vite",
-    "start": "vite",
-    "build": "vite build",
-    "serve": "vite preview"
+    "dev": "node tools/serve.mjs",
+    "start": "node tools/serve.mjs",
+    "build": "node tools/check.mjs",
+    "serve": "node tools/serve.mjs",
+    "test": "node tools/check.mjs",
+    "check": "node tools/check.mjs"
   },
   "dependencies": {
     "svelte-loader": "^3.1.2",

@@ -117,7 +117,7 @@
     preview: '',
 
     // 'all' | 'thumb' | 'none' - which fingers the hand solver drives
-    fingers: 'thumb',
+    fingers: 'all',
 
     // --- emotion presets ----------------------------------------------
     // Where the 0..1 signal range comes from:
@@ -436,7 +436,9 @@
       var raw = localStorage.getItem(STORE_KEY);
       if (raw) {
         saved = JSON.parse(raw);
-        for (var j in saved) if (j in out) out[j] = sanitize(j, saved[j]);
+        for (var j in DEFAULTS) {
+          if (saved && Object.prototype.hasOwnProperty.call(saved, j)) out[j] = sanitize(j, saved[j]);
+        }
       }
     } catch (e) {}
     out.preview = '';
@@ -471,6 +473,7 @@
   }
 
   function resetSettings() {
+    if (calRun) stopCalibration(T('Calibration cancelled.'));
     try { localStorage.removeItem(STORE_KEY); } catch (e) {}
     var fresh = load();
     for (var k in fresh) cfg[k] = fresh[k];
@@ -575,6 +578,7 @@
   function applyImported(parsed) {
     var body = settingsFromPayload(parsed);
     if (!body) return null;
+    if (calRun) stopCalibration(T('Calibration cancelled.'));
     var langChanged = false;
     var needsReload = false;
     var bad = {};
@@ -583,7 +587,10 @@
       var next = sanitize(k, body[k]);
       // a calibration that did not survive validation is not the same as one
       // the file never had, and only the first is worth telling anyone about
-      if (body[k] && next == null && DEFAULTS[k] === null) bad[k] = true;
+      if (body[k] && next == null && DEFAULTS[k] === null) {
+        bad[k] = true;
+        continue;
+      }
       if (cfg[k] === next) continue;
       if (k === 'lang') langChanged = true;
       if (NEEDS_RELOAD[k]) needsReload = true;
@@ -650,7 +657,8 @@
   }
 
   function save() {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch (e) {}
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); }
+    catch (e) { console.warn('[psx] Could not save settings; changes only last for this session.', e); }
   }
 
   function log() {
@@ -4385,8 +4393,13 @@
   // half the length off. Rejecting short arms would throw away every gesture
   // toward the camera, which is the one this layer works hardest to get right.
   var armLenSeen = { Right: meter(), Left: meter() };
+  var armLenFrame = { Right: -1, Left: -1 };
+  var armLenPass = { Right: true, Left: true };
 
   function armLenOk(side, len) {
+    if (armLenFrame[side] === poseSeq) return armLenPass[side];
+    armLenFrame[side] = poseSeq;
+    armLenPass[side] = false;
     var st = armLenSeen[side];
     if (st.n >= SANITY_WARMUP && len > st.hi * 1.25 && st.bad < SANITY_GIVE_UP) {
       st.bad++;
@@ -4398,6 +4411,7 @@
     // never gets here, so one bad reading cannot install itself as the new
     // normal - but an arm that really did get longer on screen still lands.
     st.hi = (st.n === 1 || len > st.hi) ? len : st.hi + (len - st.hi) * 0.01;
+    armLenPass[side] = true;
     return true;
   }
 
@@ -4486,9 +4500,11 @@
   // Takes the image-space pose directly: `pose()` has not run yet this frame,
   // so there is no `poseImg` to read.
   function hands(h, image) {
-    poseImg = (image && image.length > LM_NOSE) ? image : poseImg;
+    poseImg = (image && image.length > LM_NOSE) ? image : null;
     imgSeq++;
-    return placeHands(h) || h;
+    poseHand = placeHands(h);
+    if (!poseImg) poseLm = null;
+    return poseHand || h;
   }
 
   function pose(world, image, hands) {
@@ -4498,7 +4514,9 @@
     poseHand = placeHands(hands);
     imgSeq++;
     noteFaceOcc();
-    if (!world || world.length <= ARM_LM.Left.hip) { poseLm = null; return; }
+    if (!world || world.length <= ARM_LM.Left.hip ||
+      !worldPoint(world[0]) || !worldPoint(world[11]) || !worldPoint(world[12]) ||
+      !worldPoint(world[23]) || !worldPoint(world[24])) { poseLm = null; return; }
     poseLm = world;
     poseLmAt = now();
     poseSeq++;
@@ -4580,8 +4598,11 @@
   }
 
   function vis(p) {
-    return !!p && (p.visibility == null || p.visibility > MIN_VIS);
+    return !!p && isNum(p.x) && isNum(p.y) && (p.z == null || isNum(p.z)) &&
+      (p.visibility == null || p.visibility > MIN_VIS);
   }
+
+  function worldPoint(p) { return !!p && isNum(p.x) && isNum(p.y) && isNum(p.z); }
 
   // The middle of the head, not the front of the face. Falls back to the nose
   // where the ears are not tracked - a worse reference, but the only other one.
@@ -4627,7 +4648,7 @@
         seg: {}, headB: undefined, headAt: 0, headH: 0,
         // per-side dead-reckoning state: the raw target of the last inference,
         // when it was taken, and the velocity between the last two
-        raw: {}, rawAt: {}, rawSeq: {}, vel: {}, elb: {}, aim: {},
+        raw: {}, rawAt: {}, rawSeq: {}, vel: {}, elb: {}, aim: {}, pole: {},
         // per-side coast state: when this arm was last solved from live
         // landmarks, and the three rotations it was left in
         goodAt: {}, lostAt: {}, sb: {}, held: {
@@ -4753,8 +4774,8 @@
   // Image y runs down the screen and image z is a rough depth in x's units;
   // neither matters once both are read as components of this frame.
   function imageBasis() {
-    if (imgBasisSeq === poseSeq) return imgBasis;
-    imgBasisSeq = poseSeq;
+    if (imgBasisSeq === imgSeq) return imgBasis;
+    imgBasisSeq = imgSeq;
     imgBasis = null;
     var p = poseImg;
     if (!p || p.length <= ARM_LM.Left.hip) return null;
@@ -4788,6 +4809,69 @@
     var across = vnorm(mapDir(lmVec(ix, pk), ib, mb, sx, depth));
     if (!fwd || !across) return null;
     return { fwd: fwd, across: across };
+  }
+
+  // Angles on either side of the atan2 seam are neighbours. Filtering their
+  // raw numbers turns a nearly stationary palm through the whole front half.
+  function followRoll(previous, angle, k) {
+    if (!isNum(previous)) return angle;
+    var delta = Math.atan2(Math.sin(angle - previous), Math.cos(angle - previous));
+    return previous + delta * k;
+  }
+
+  // Contact belongs to the torso's proportions, not the arm's length. Image
+  // proximity identifies the waist; world depth excludes a hand aimed at the
+  // camera that merely overlaps it. Offscreen hips cannot establish contact.
+  function waistContact(lm, img, idx) {
+    if (!img || !vis(img[idx.wrist]) || !vis(img[23]) || !vis(img[24])
+      || !vis(img[11]) || !vis(img[12])) return 0;
+    var hip = img[idx.hip], wr = img[idx.wrist], sh = img[idx.shoulder];
+    if (hip.x < 0 || hip.x > 1 || hip.y < 0 || hip.y > 1) return 0;
+    var span = Math.sqrt(imgDist(img[11], img[12]));
+    if (span < 1e-4) return 0;
+    var dx = wr.x - hip.x, dy = wr.y - (hip.y + (sh.y - hip.y) * 0.18);
+    var near = Math.sqrt(dx * dx + dy * dy) / span;
+    var worldSpan = dist3(lm[11], lm[12]);
+    var depthGap = Math.abs(lm[idx.wrist].z - lm[idx.hip].z);
+    return clamp((0.45 - near) / 0.25, 0, 1)
+      * clamp((worldSpan - depthGap) / Math.max(worldSpan * 0.5, 1e-4), 0, 1);
+  }
+
+  // The hand detector sees the wrist during a face gesture even when the pose
+  // detector puts it on the chest. Recover its image-plane offset using the
+  // same person's shoulders as the horizontal ruler and head as the vertical
+  // ruler. Keep world z: the two detectors' depth origins are unrelated.
+  function faceWristOffset(side, lm, fallback) {
+    var img = poseImg, h = poseHand && poseHand[side];
+    if (!img || !h || !vis(h[0]) || !vis(img[11]) || !vis(img[12])) return fallback;
+    var ih = headRef(img), wh = headRef(lm);
+    if (!vis(ih) || !vis(wh)) return fallback;
+    var ix = img[12].x - img[11].x, wx = lm[12].x - lm[11].x;
+    var iy = ih.y - (img[11].y + img[12].y) * 0.5;
+    var wy = wh.y - (lm[11].y + lm[12].y) * 0.5;
+    if (Math.abs(ix) < 0.05 || Math.abs(iy) < 0.03 || wx / ix <= 0 || wy / iy <= 0) return fallback;
+    return v3((h[0].x - ih.x) * wx / ix, (h[0].y - ih.y) * wy / iy, fallback.z);
+  }
+
+  var contactMemo = {
+    Right: { seq: -1, pose: -1, wrist: null, waist: 0 },
+    Left: { seq: -1, pose: -1, wrist: null, waist: 0 }
+  };
+
+  function contactReading(side, lm, idx) {
+    var m = contactMemo[side];
+    if (m.seq === imgSeq && m.pose === poseSeq) return m;
+    m.seq = imgSeq; m.pose = poseSeq; m.wrist = null; m.waist = 0;
+    var wr = lm[idx.wrist], hr = headRef(lm);
+    if (wr && vis(hr) && sideHitsFace(side)) {
+      var original = vsub(wr, hr);
+      var recovered = faceWristOffset(side, lm, original);
+      if (recovered !== original) m.wrist = vadd(hr, recovered);
+    }
+    if (vis(wr) && vis(lm[11]) && vis(lm[12]) && vis(lm[23]) && vis(lm[24])) {
+      m.waist = waistContact(lm, poseImg, idx);
+    }
+    return m;
   }
 
   // Something on the far side of the wrist to aim the hand bone by. The middle
@@ -4836,7 +4920,9 @@
       hand: d.hand, twistDeg: deg(d.twist), twistCapped: d.twistCapped,
       palmDot: r2(d.palmDot),
       rollHeld: d.rollHeld, handRest: d.handRest,
-      imgNear: r2(d.imgNear), occ: d.occ, stand: r2(d.stand)
+      imgNear: r2(d.imgNear), occ: d.occ, stand: r2(d.stand),
+      waist: r2(d.waist), targetDistance: r2(d.targetDistance),
+      lengthAccepted: armLenPass[d.side], wristSource: d.wristSource
     };
   }
 
@@ -4937,6 +5023,7 @@
     d.gap = null; d.reach = 1; d.hand = false; d.twist = null;
     d.twistCapped = false; d.rollHeld = false; d.handRest = false;
     d.palmDot = null; d.imgNear = null; d.occ = false; d.stand = 0;
+    d.side = side; d.waist = 0; d.targetDistance = 0; d.wristSource = 'pose';
     return d;
   }
 
@@ -4992,9 +5079,14 @@
     var lm = poseLm;
     var live = !!lm && now() - poseLmAt <= POSE_STALE_MS;
     var sh, el, wr;
+    var contact = null;
     if (live) {
       sh = lm[idx.shoulder]; el = lm[idx.elbow]; wr = lm[idx.wrist];
-      live = vis(sh) && vis(el) && vis(wr);
+      contact = contactReading(side, lm, idx);
+      // A directly detected hand can recover an occluded pose wrist. The
+      // shoulder and elbow must still be visible; this does not invent an arm.
+      if (contact.wrist) { wr = contact.wrist; dbg.wristSource = 'hand image'; }
+      live = vis(sh) && vis(el) && vis(wr) && worldPoint(sh) && worldPoint(el) && worldPoint(wr);
     }
     // the two trackers disagree about where this person even is
     armWhy = (lm && now() - poseLmAt > POSE_STALE_MS) ? 'landmarks are stale'
@@ -5169,6 +5261,21 @@
       }
     }
 
+    var waistW = (1 - anchorW) * contact.waist;
+    dbg.waist = waistW;
+    if (waistW > 0) {
+      var uHip = vmid(lm[23], lm[24]), mHip = worldPos(c.hips);
+      var uTorso = vlen(vsub(vmid(lm[11], lm[12]), uHip));
+      var mTorso = vlen(vsub(vmid(worldPos(c.ru), worldPos(c.lu)), mHip));
+      var uWidth = dist3(lm[11], lm[12]);
+      if (uTorso > 1e-4 && uWidth > 1e-4) {
+        var mWidth = dist3(worldPos(c.ru), worldPos(c.lu));
+        var waistOff = mapDir(vsub(wr, uHip), ub, mb, sx,
+          { x: mWidth / uWidth, y: mTorso / uTorso, z: mWidth / uWidth });
+        off = vlerp(off, vsub(vadd(mHip, waistOff), worldPos(upper)), waistW);
+      }
+    }
+    var contactW = Math.max(anchorW, waistW);
     var t = now();
 
     // Mediapipe runs well under the render rate, so most frames re-use a target
@@ -5189,7 +5296,7 @@
     }
     if (cfg.predict && c.vel[side]) {
       var age = Math.min((t - poseLmAt) / 1000, 0.12);
-      var step = vmul(c.vel[side], age * cfg.predict);
+      var step = vmul(c.vel[side], age * cfg.predict * (1 - contactW));
       var cap = (a + b) * 0.15;
       var sl = vlen(step);
       if (sl > cap) step = vmul(step, cap / sl);
@@ -5282,7 +5389,8 @@
     // Right at the face, where the hand *is* is the whole point and the bend has
     // to give; away from it the bend is the honest signal and the distance
     // gives. Same blend either way, so there is no seam between them.
-    if (anchorW > 0) want += (vlen(toT) - want) * anchorW;
+    if (contactW > 0) want += (vlen(toT) - want) * contactW;
+    dbg.targetDistance = vlen(toT);
 
     // the direction is filtered above; the bend has to be filtered too, or the
     // elbow is the one joint still chasing raw landmark noise
@@ -5319,7 +5427,14 @@
     // law of cosines: how far off the line to the target the upper arm has to
     // sit for the elbow to bend by the right amount
     var alpha = Math.acos(clamp((a * a + d * d - b * b) / (2 * a * d), -1, 1));
-    var axis = vnorm(vcross(dir, pole || mb.z)) ||
+    // The elbow pole is a direction too. Near a straight arm its projection
+    // collapses and normalising noise can flip the elbow to the other side.
+    var polePlane = pole && perpTo(pole, dir);
+    var oldPole = c.pole[side] && vnorm(perpTo(c.pole[side], dir));
+    var nextPole = polePlane && vlen(polePlane) > 0.05 ? vnorm(polePlane) : oldPole;
+    if (!instant && oldPole && nextPole) nextPole = vnorm(vlerp(oldPole, nextPole, k)) || oldPole;
+    if (nextPole) c.pole[side] = nextPole;
+    var axis = vnorm(vcross(dir, nextPole || mb.z)) ||
       vnorm(vcross(dir, mb.y)) || mb.z;
     var upDir = rotAbout(dir, axis, alpha);
     var loDir = vnorm(vsub(target, vadd(S, vmul(upDir, a))));
@@ -5402,7 +5517,7 @@
       // what the landmarks asked for, before the limit and the filter get to it
       dbg.hand = !!(hw && hChild);
       dbg.twist = ang;
-      dbg.twistCapped = ang != null && Math.abs(ang) > 2.6;
+      dbg.twistCapped = false;
 
       // Which way the palm ends up facing, against the way the head lies.
       //
@@ -5428,10 +5543,11 @@
         if (pNorm && toHead) dbg.palmDot = vdot(pNorm, toHead);
       }
       if (ang != null) {
-        // a forearm does not rotate past about 150 degrees, and a landmark that
-        // says it did is a landmark that has flipped the hand over
-        ang = clamp(ang, -2.6, 2.6) * cfg.twist;
-        if (!instant && isNum(c.roll[side])) ang = c.roll[side] + (ang - c.roll[side]) * k;
+        // This angle is relative to the model's bind pose, not an anatomical
+        // pronation measurement. An absolute clamp here excludes valid palms
+        // on rigs whose bind happens to sit across the atan2 seam.
+        ang *= cfg.twist;
+        if (!instant) ang = followRoll(c.roll[side], ang, k);
         c.roll[side] = ang;
         rollBone(c, lower, loDir, ang);
         // the roll turned the forearm, and the hand rode along with it
@@ -6637,6 +6753,21 @@
 
   function registerModel(vrm, gltf) {
     if (!vrm) return vrm;
+    // Capture bind rotations before the bundle's initial Euler rig writes
+    // them. Enabling IK later must not adopt an animated pose as rest.
+    if (vrm.scene && vrm.scene.traverse) {
+      vrm.scene.traverse(function (node) {
+        if (node.isBone && node.quaternion && !node.__psxRest) restQuat(node);
+      });
+    }
+    if (!vrm.__psxDisposeHook && typeof vrm.dispose === 'function') {
+      var dispose = vrm.dispose;
+      vrm.__psxDisposeHook = true;
+      vrm.dispose = function () {
+        try { return dispose.apply(this, arguments); }
+        finally { unregisterModel(this); }
+      };
+    }
     vrm.__psxGltf = gltf || null;
     var at = models.indexOf(vrm);
     if (at !== -1) models.splice(at, 1);
@@ -6650,6 +6781,15 @@
     syncShaderUniforms();
     scheduleInject();
     return vrm;
+  }
+
+  function unregisterModel(vrm) {
+    var at = models.indexOf(vrm);
+    if (at >= 0) models.splice(at, 1);
+    vrm.__psxGltf = null;
+    vrm.__psxUvBinds = null;
+    vrm.__psxArm = null;
+    scheduleInject();
   }
 
   function refreshModels() {
@@ -6959,6 +7099,7 @@
       var pct = (cfg[key] - min) / (max - min) * 100;
       input.style.backgroundSize = pct + '% 100%';
       if (h.__readout) h.__readout.textContent = fmt(cfg[key]);
+      input.setAttribute('aria-valuetext', fmt(cfg[key]));
     }
     input.addEventListener('input', function () {
       cfg[key] = parseFloat(input.value);
@@ -7037,6 +7178,7 @@
       input.value = idx;
       input.style.backgroundSize = (idx / (values.length - 1) * 100) + '% 100%';
       if (h.__readout) h.__readout.textContent = labels[idx];
+      input.setAttribute('aria-valuetext', labels[idx]);
     }
     input.addEventListener('input', function () {
       cfg[key] = values[parseInt(input.value, 10)];
@@ -7687,24 +7829,32 @@
   // as a control this fork bolted on.
   function bgSwatch(item, fixed) {
     var box = el('div', '', '');
+    box.style.cssText = 'position:relative;width:44px;height:44px;flex:0 0 auto;';
+    var pick = el('button', 'psx-colour-pick', '');
+    pick.type = 'button';
     var on = bgEditUrl === item.url;
-    box.style.cssText = 'position:relative;width:40px;height:40px;border-radius:8px;' +
-      'cursor:pointer;flex:0 0 auto;transition:box-shadow .2s ease;' +
+    pick.style.cssText = 'width:44px;height:44px;padding:0;border:0;border-radius:8px;' +
+      'cursor:pointer;transition:box-shadow .2s ease;' +
       (isAlphaHex(item.url) ? CHECKER : 'background:' + item.url + ';') +
       'box-shadow:0 0 0 1px rgba(0,0,0,.45)' +
       (on ? ',0 0 0 3px var(--lightBlue)' : '');
-    box.title = fixed ? T(item.name) : item.url;
-    box.addEventListener('click', function () { editColour(item.url); });
+    pick.title = fixed ? T(item.name) : item.url;
+    pick.setAttribute('aria-label', pick.title);
+    pick.setAttribute('aria-pressed', String(on));
+    pick.setAttribute('data-psx-colour', item.url);
+    pick.addEventListener('click', function () { editColour(item.url); });
+    box.appendChild(pick);
     // A preset is not a saved colour. Nothing to delete, and deleting it would
     // leave a profile with no way back to the two colours it is meant to have.
     if (fixed) return box;
 
     var x = el('button', '', '×');
-    x.style.cssText = 'position:absolute;top:-6px;right:-6px;width:18px;height:18px;' +
-      'line-height:16px;padding:0;border:0;border-radius:9px;font-size:14px;' +
+    x.type = 'button';
+    x.style.cssText = 'position:absolute;top:-8px;right:-8px;width:24px;height:24px;' +
+      'line-height:22px;padding:0;border:0;border-radius:12px;font-size:14px;' +
       'font-weight:600;background:var(--lightRed);color:#fff;cursor:pointer;' +
       'box-shadow:0 1px 3px rgba(0,0,0,.4)';
-    x.setAttribute('aria-label', T('Delete colour'));
+    x.setAttribute('aria-label', T('Delete colour') + ' ' + item.url);
     x.addEventListener('click', function (e) {
       e.stopPropagation();
       dropColour(item.url);
@@ -7783,17 +7933,28 @@
     if (!host) { bgCard = null; return; }
     var sig = bgSignature();
     if (bgCard && bgCard.parentNode === host && bgCard.__psxSig === sig) return;
+    var active = document.activeElement;
+    var hadFocus = bgCard && active && bgCard.contains(active);
+    var focusColour = hadFocus && active.getAttribute('data-psx-colour');
     if (bgCard && bgCard.parentNode) bgCard.parentNode.removeChild(bgCard);
     bgCard = buildBgColours();
     bgCard.__psxSig = sig;
     host.appendChild(bgCard);
+    if (hadFocus) {
+      var picks = bgCard.querySelectorAll('.psx-colour-pick');
+      var next = picks[0];
+      for (var i = 0; i < picks.length; i++) {
+        if (picks[i].getAttribute('data-psx-colour') === focusColour) next = picks[i];
+      }
+      if (next) next.focus();
+    }
   }
 
   function injectInto(c, build, keyed) {
     if (!c) return;
     // only the Settings side lists per-model expression cells, so it is the
     // only one that has to be rebuilt when the loaded model changes
-    var wantKeys = expressionKeys().length;
+    var wantKeys = JSON.stringify(expressionKeys());
     var existing = c.querySelectorAll('.psx-injected');
     if (existing.length) {
       if (!keyed || c.__psxKeys === wantKeys) return;
@@ -7814,7 +7975,7 @@
     // detached node being written to forever: syncCalUi would keep relabelling
     // the old button and the new one would never change.
     calEl = calMotionEl = calMouthEl = calBlinkEl = null;
-    readoutEl = eyeReadoutEl = importNoteEl = null;
+    readoutEl = eyeReadoutEl = importNoteEl = voiceNoteEl = null;
     calBtn = calMotionBtn = calMouthBtn = calBlinkBtn = null;
     calCancelBtn = calMotionCancelBtn = calMouthCancelBtn = calBlinkCancelBtn = null;
     bgCard = null;

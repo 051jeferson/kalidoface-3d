@@ -15,6 +15,30 @@
 > is what genuinely varies between models and machines: render scale, snap grid,
 > colour depth, tracking rates and per-model calibration.
 
+## Run and verify
+
+With Node 18 or newer, no dependency installation is needed:
+
+```sh
+npm run dev
+# http://127.0.0.1:5173/
+npm test
+```
+
+`dev`, `start` and `serve` serve the committed `docs/` site. `build`, `check`
+and `test` run syntax, hook/stub and regression checks; they never rebuild or
+overwrite the bundle. `npm run dev -- --port 5174` selects another port.
+The Python HTTP server documented in `AGENTS.md` remains supported.
+
+New profiles animate all fingers. An older profile set to **thumb only** keeps
+that preference: choose **all fingers** under **PSX Hands** for pointing or a
+finger-to-lips gesture. Arm contact now uses head/torso proportions, disables
+prediction at contact and follows palm roll continuously through ±180°.
+
+The [September 2026 audit](AUDIT.md) records fixes, validation and remaining
+hardware/model checks. Offline use requires a previously loaded/uploaded VRM;
+the upstream sample avatars and some gallery images still use remote URLs.
+
 ## What the PSX layer does
 
 `docs/psx.js` loads as a plain script **before** the app bundle and exposes `window.PSX`.
