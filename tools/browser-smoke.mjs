@@ -99,8 +99,25 @@ try {
       PSX.arm(vrm, dummy, 'Right', false, true, bones.rightUpperArm, bones.rightLowerArm, bones.rightHand);
     }
     const msPerArm = (performance.now() - start) / 2000;
+    world[15] = p(-0.15, -0.09); world[13] = p(-0.35, -0.25);
+    image[15] = p(0.35, 0.71); image[13] = p(0.15, 0.55);
+    world[19] = p(-0.15, -0.09, 0.04); world[17] = p(-0.15, -0.09, -0.04);
+    function palmFrame() {
+      PSX.pose(world, image, { Right: null, Left: null });
+      PSX.arm(vrm, dummy, 'Right', false, false,
+        bones.rightUpperArm, bones.rightLowerArm, bones.rightHand);
+      return PSX.armInfo().right;
+    }
+    const palmBefore = palmFrame();
+    [world[19], world[17]] = [world[17], world[19]];
+    const palmFlip = palmFrame();
+    for (let i = 0; i < 100; i++) PSX.arm(vrm, dummy, 'Right', false, false,
+      bones.rightUpperArm, bones.rightLowerArm, bones.rightHand);
+    const palmRepeat = PSX.armInfo().right;
+    palmFrame();
+    const palmRecovered = palmFrame();
     Object.assign(PSX.cfg, cfg);
-    return { waist, head, recovery, msPerArm };
+    return { waist, head, recovery, msPerArm, palmBefore, palmFlip, palmRepeat, palmRecovered };
   });
   assert.ok(rigResult.waist.success && rigResult.head.success, 'both contact poses must solve');
   assert.ok(rigResult.waist.debug.waist > 0.9);
@@ -110,6 +127,13 @@ try {
   assert.ok(Object.values(rigResult.head.position).every(Number.isFinite));
   assert.ok(rigResult.recovery.success);
   assert.equal(rigResult.recovery.debug.wristSource, 'hand image');
+  assert.equal(rigResult.palmBefore.rollSource, 'pose');
+  assert.equal(rigResult.palmBefore.rollRejected, false);
+  assert.equal(rigResult.palmFlip.rollRejected, true, 'an inverted palm must be confirmed');
+  assert.equal(rigResult.palmFlip.rollHeld, true, 'keep the previous roll while rejecting a flip');
+  assert.equal(rigResult.palmRepeat.rollRejected, true, 'renders cannot confirm an inversion');
+  assert.equal(rigResult.palmRepeat.rollDeg, rigResult.palmBefore.rollDeg);
+  assert.equal(rigResult.palmRecovered.rollRejected, false, 'a consistent new palm recovers');
   console.log('Bundled three.js IK:', JSON.stringify(rigResult));
   await page.locator('[data-text="Settings"]').click();
   const language = page.locator('select[name="psx-lang"]');

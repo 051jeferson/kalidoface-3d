@@ -21,6 +21,33 @@ assert.ok(Math.abs(r.followRoll(rad(179), rad(-179), 0.5) - Math.PI) < 1e-10,
 assert.ok(Math.abs(r.followRoll(rad(-179), rad(179), 0.5) + Math.PI) < 1e-10);
 assert.equal(r.followRoll(undefined, 1, 0.5), 1);
 
+// Tiny opposite perturbations near the forearm axis used to request opposite
+// palms. A well-conditioned quarter turn must still be measurable.
+assert.equal(r.twistAngle(p(1, 0), p(0.001, 0, 1), p(0, 0, 1)), null);
+assert.equal(r.twistAngle(p(1, 0), p(-0.001, 0, 1), p(0, 0, 1)), null);
+assert.equal(r.twistAngle(p(0.001, 0, 1), p(1, 0), p(0, 0, 1)), null);
+assert.ok(Math.abs(r.twistAngle(p(1, 0), p(0, 1), p(0, 0, 1)) - Math.PI / 2) < 1e-10);
+const reading = { seq: -1, angle: null, pending: null, count: 0 };
+assert.equal(r.stableRoll(reading, 0, 0), 0);
+for (let i = 0; i < 144; i++) assert.equal(r.stableRoll(reading, rad(170), 1), null);
+assert.equal(reading.count, 1, 'render retries cannot confirm a detector flip');
+assert.equal(r.stableRoll(reading, rad(5), 2), rad(5), 'one bad sample does not disturb a held palm');
+assert.equal(r.stableRoll(reading, rad(170), 3), null);
+assert.equal(r.stableRoll(reading, rad(175), 4), null);
+assert.equal(r.stableRoll(reading, rad(178), 5), rad(178), 'a consistent new pose recovers');
+assert.equal(r.stableRoll(reading, rad(-179), 6), rad(-179), 'the angular seam is not a flip');
+assert.equal(r.stableRoll(reading, null, 7), null);
+assert.equal(r.stableRoll(reading, 0, 8), null);
+assert.equal(r.stableRoll(reading, null, 9), null);
+assert.equal(r.stableRoll(reading, 0, 10), null);
+assert.equal(reading.count, 1, 'missing readings break confirmation');
+const continuous = { seq: -1, angle: null, pending: null, count: 0 };
+for (let d = -180; d <= 540; d += 10) {
+  const angle = Math.atan2(Math.sin(rad(d)), Math.cos(rad(d)));
+  assert.equal(r.stableRoll(continuous, angle, d), angle,
+    'continuous rotation across multiple seams must not be delayed');
+}
+
 for (let sample = 0; sample < 30; sample++) {
   r.frame(null, null, null);
   for (let render = 0; render < 7; render++) assert.equal(r.armLenOk('Right', 1), true);
@@ -55,4 +82,4 @@ r.image(tilted);
 assert.notEqual(r.imageBasis().x.y, basis.x.y, 'new images invalidate the basis even without new world landmarks');
 assert.equal(r.psx.fingers().length, 5, 'new profiles can articulate the index finger');
 assert.equal(runtime({ fingers: 'thumb' }).psx.fingers().length, 1, 'explicit saved finger settings survive');
-console.log('Motion regressions passed: palm seam, inference gates, waist contact, face wrist, image cache, finger settings.');
+console.log('Motion regressions passed: palm seam, degenerate palms, flip confirmation, inference gates, waist contact, face wrist, image cache, finger settings.');

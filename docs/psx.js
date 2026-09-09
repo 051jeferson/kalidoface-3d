@@ -4786,7 +4786,10 @@
         vA: ru.position.clone(), vB: ru.position.clone(),
         qA: ru.quaternion.clone(), qB: ru.quaternion.clone(),
         qC: ru.quaternion.clone(), qD: ru.quaternion.clone(),
-        keep: ru.quaternion.clone(), roll: {}
+        keep: ru.quaternion.clone(), roll: {}, rollReading: {
+          Right: { seq: -1, angle: null, pending: null, count: 0 },
+          Left: { seq: -1, angle: null, pending: null, count: 0 }
+        }
       };
     }
     vrm.__psxArm = c;
@@ -4849,8 +4852,12 @@
   // flattened onto the plane across the axis first, so only rotation about it
   // is counted - which is what a forearm twist is.
   function twistAngle(from, to, axis) {
-    var f = vnorm(perpTo(from, axis));
-    var t = vnorm(perpTo(to, axis));
+    var fp = perpTo(from, axis), tp = perpTo(to, axis);
+    // A nearly axial palm has no reliable roll. Normalising its tiny
+    // projection magnifies landmark noise into a half turn.
+    if (vlen(fp) < 0.15 * vlen(from) || vlen(tp) < 0.15 * vlen(to)) return null;
+    var f = vnorm(fp);
+    var t = vnorm(tp);
     if (!f || !t) return null;
     return Math.atan2(vdot(vcross(f, t), axis), clamp(vdot(f, t), -1, 1));
   }
@@ -4939,6 +4946,27 @@
     if (!isNum(previous)) return angle;
     var delta = Math.atan2(Math.sin(angle - previous), Math.cos(angle - previous));
     return previous + delta * k;
+  }
+
+  // Detector dropouts can replace a detailed palm with contradictory pose
+  // knuckles. Confirm a large discontinuity on distinct images, never on
+  // repeated renders. Three consistent samples still admit a real new pose.
+  function stableRoll(reading, angle, seq) {
+    if (reading.seq === seq) return reading.value == null ? null : angle;
+    reading.seq = seq;
+    reading.value = null;
+    if (angle == null) { reading.pending = null; reading.count = 0; return null; }
+    if (reading.angle != null && Math.abs(followRoll(reading.angle, angle, 1) - reading.angle) > Math.PI / 2) {
+      var same = reading.pending != null &&
+        Math.abs(followRoll(reading.pending, angle, 1) - reading.pending) < Math.PI / 6;
+      reading.count = same ? reading.count + 1 : 1;
+      reading.pending = angle;
+      if (reading.count < 3) return null;
+    }
+    reading.pending = null; reading.count = 0;
+    reading.angle = angle;
+    reading.value = angle;
+    return angle;
   }
 
   // Contact belongs to the torso's proportions, not the arm's length. Image
@@ -5042,6 +5070,8 @@
       hand: d.hand, twistDeg: deg(d.twist), twistCapped: d.twistCapped,
       palmDot: r2(d.palmDot),
       rollHeld: d.rollHeld, handRest: d.handRest,
+      rollSource: d.rollSource, rollRejected: d.rollRejected, rollDeg: deg(d.roll),
+      rollDegenerate: d.rollDegenerate,
       imgNear: r2(d.imgNear), occ: d.occ, stand: r2(d.stand),
       waist: r2(d.waist), targetDistance: r2(d.targetDistance),
       lengthAccepted: armLenPass[d.side], wristSource: d.wristSource
@@ -5144,6 +5174,8 @@
     d.anchor = 0; d.near = null; d.wristSeen = 0; d.upper = 0; d.fore = 0;
     d.gap = null; d.reach = 1; d.hand = false; d.twist = null;
     d.twistCapped = false; d.rollHeld = false; d.handRest = false;
+    d.rollSource = 'none'; d.rollRejected = false; d.roll = null;
+    d.rollDegenerate = false;
     d.palmDot = null; d.imgNear = null; d.occ = false; d.stand = 0;
     d.side = side; d.waist = 0; d.targetDistance = 0; d.wristSource = 'pose';
     return d;
@@ -5640,6 +5672,11 @@
       dbg.hand = !!(hw && hChild);
       dbg.twist = ang;
       dbg.twistCapped = false;
+      dbg.rollSource = hw ? 'hand' : (wantAcross ? 'pose' : 'none');
+      var rawRoll = ang;
+      dbg.rollDegenerate = !!(wantAcross && haveAcross && ang == null);
+      if (!instant) ang = stableRoll(c.rollReading[side], ang, imgSeq);
+      dbg.rollRejected = rawRoll != null && ang == null;
 
       // Which way the palm ends up facing, against the way the head lies.
       //
@@ -5671,10 +5708,12 @@
         ang *= cfg.twist;
         if (!instant) ang = followRoll(c.roll[side], ang, k);
         c.roll[side] = ang;
+        dbg.roll = ang;
         rollBone(c, lower, loDir, ang);
         // the roll turned the forearm, and the hand rode along with it
         if (hw && hChild) aimBone(c, hand, hChild, c.aim[side]);
       } else if (haveAcross && isNum(c.roll[side])) {
+        dbg.roll = c.roll[side];
         // Nothing could read the palm this frame. Both hands up beside the head
         // is the case that does it: they hide each other and the skull, the
         // hand model drops both, and the pose's own knuckles go with them.

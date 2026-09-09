@@ -660,6 +660,13 @@ The elbow landmark is the pole, so nothing guesses which way the elbow folds.
   forearm. The pose model's own knuckle landmarks are the fallback; it finds
   them as a by-product of finding the arm and they jitter by more than the palm
   is wide. Models without finger bones fall back to no twist at all.
+  Nearly axial palm readings now hold the previous rotation instead of
+  amplifying noise. A jump above 90 degrees needs three consistent camera
+  samples before it is accepted; ordinary continuous turns remain immediate
+  inputs to the existing smoothing. This can delay a genuine abrupt turn by
+  two tracking intervals. It adds no detector or polling loop.
+  `PSX.armInfo()` reports `rollSource`, `rollRejected`, `rollDegenerate` and
+  `rollDeg` to distinguish source changes, rejected jumps and unreadable palms.
 - **Face anchor** — a hand at the face is a gesture *about the head*, and
   measuring it out from the shoulder in arm-lengths gets it wrong on exactly the
   models this fork is for. A low-poly avatar is a big head on short arms, so its
