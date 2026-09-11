@@ -38,6 +38,17 @@ Bent wrists preserve the detected palm orientation through forearm rotation.
 Visible hands beside the head also correct the pose detector's wrist position;
 this recovery fades out as the gesture moves away from the head.
 `PSX.armInfo()` reports `palmError` in degrees after the rotation for diagnosis.
+Palm smoothing follows the observed orientation and angular speed, so moving
+the elbow does not change the palm's zero and rotating a stationary wrist still
+opens the adaptive filter. Sudden detector inversions require three distinct
+images. `trackedNormalZ` and `modelNormalZ` compare the detected and rendered
+hand-plane normals along the chest axis; their signs are geometric, not universal
+left/right labels for palm versus dorsum.
+Simplified rigs can use the thumb base instead of requiring separate index and
+little-finger bones. `palmBasis` identifies the matched model/detector landmarks
+(including `thumb-wrist` for a thumb-only rig); `missing` means no usable pair
+was found. `handDetected` reports detector availability, while `hand` reports
+whether the model also supports aiming the wrist from a finger bone.
 The optional `node tools/test-hand-rig.mjs <path-to-playwright/index.mjs>` check
 exercises both hands, bent wrists and different bind rotations with the bundled
 Three.js. It requires an existing Playwright installation and Chromium.

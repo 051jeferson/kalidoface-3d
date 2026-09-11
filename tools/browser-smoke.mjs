@@ -99,6 +99,23 @@ try {
       PSX.arm(vrm, dummy, 'Right', false, true, bones.rightUpperArm, bones.rightLowerArm, bones.rightHand);
     }
     const msPerArm = (performance.now() - start) / 2000;
+    // A mitten-style PSX rig may expose only a thumb: no middle/index/little
+    // humanoid bones. The old path silently produced no roll on either hand.
+    const hidden = {};
+    for (const name of ['rightMiddleProximal', 'rightIndexProximal', 'rightLittleProximal']) {
+      hidden[name] = bones[name]; delete bones[name];
+    }
+    bone('rightThumbProximal', bones.rightHand, -0.04, 0, 0.025);
+    const thumbVrm = { humanoid: vrm.humanoid };
+    const thumbTurns = [];
+    for (const direction of [1, -1]) {
+      hand[1] = p(hand[0].x + 0.04 * direction, hand[0].y, hand[0].z + 0.02 * direction);
+      PSX.pose(world, image, { Right: hand, Left: null });
+      const success = PSX.arm(thumbVrm, dummy, 'Right', false, true,
+        bones.rightUpperArm, bones.rightLowerArm, bones.rightHand);
+      thumbTurns.push({ success, ...PSX.armInfo().right });
+    }
+    Object.assign(bones, hidden);
     world[15] = p(-0.15, -0.09); world[13] = p(-0.35, -0.25);
     image[15] = p(0.35, 0.71); image[13] = p(0.15, 0.55);
     world[19] = p(-0.15, -0.09, 0.04); world[17] = p(-0.15, -0.09, -0.04);
@@ -117,7 +134,7 @@ try {
     palmFrame();
     const palmRecovered = palmFrame();
     Object.assign(PSX.cfg, cfg);
-    return { waist, head, recovery, msPerArm, palmBefore, palmFlip, palmRepeat, palmRecovered };
+    return { waist, head, recovery, msPerArm, thumbTurns, palmBefore, palmFlip, palmRepeat, palmRecovered };
   });
   assert.ok(rigResult.waist.success && rigResult.head.success, 'both contact poses must solve');
   assert.ok(rigResult.waist.debug.waist > 0.9);
@@ -129,6 +146,11 @@ try {
   assert.equal(rigResult.recovery.debug.wristSource, 'hand image');
   assert.ok(typeof rigResult.recovery.debug.palmError === 'number' && Math.abs(rigResult.recovery.debug.palmError) <= 1,
     'the complete retarget preserves the detected palm with a bent wrist');
+  assert.ok(rigResult.thumbTurns.every(t => t.success && t.palmBasis === 'thumb-wrist' && typeof t.rollDeg === 'number'),
+    'a thumb-only rig must rotate instead of silently losing palm roll');
+  const thumbDelta = (rigResult.thumbTurns[1].rollDeg - rigResult.thumbTurns[0].rollDeg) * Math.PI / 180;
+  assert.ok(Math.abs(Math.atan2(Math.sin(thumbDelta), Math.cos(thumbDelta))) > 170 * Math.PI / 180,
+    'turning the thumb to the other side turns the mitten palm/dorsum by a half turn');
   assert.equal(rigResult.palmBefore.rollSource, 'pose');
   assert.equal(rigResult.palmBefore.rollRejected, false);
   assert.equal(rigResult.palmFlip.rollRejected, true, 'an inverted palm must be confirmed');

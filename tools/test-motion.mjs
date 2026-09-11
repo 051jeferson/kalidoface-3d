@@ -21,6 +21,31 @@ assert.ok(Math.abs(r.followRoll(rad(179), rad(-179), 0.5) - Math.PI) < 1e-10,
 assert.ok(Math.abs(r.followRoll(rad(-179), rad(179), 0.5) + Math.PI) < 1e-10);
 assert.equal(r.followRoll(undefined, 1, 0.5), 1);
 
+// Moving the forearm changes the bind-relative zero, not a stationary palm.
+// Old scalar smoothing would apply 9 degrees of this 90-degree compensation.
+assert.ok(Math.abs(r.palmRollAngle(p(1, 0), p(0, 1), p(0, 0, 1), p(0, 1), 0.1) - Math.PI / 2) < 1e-10);
+const palmReading = { seq: -1, frame: null, pending: null, count: 0, at: 0, speed: 0 };
+const frontPalm = r.palmFrame(p(0, 1), p(1, 0));
+const backPalm = r.palmFrame(p(0, 1), p(-1, 0));
+assert.equal(r.stablePalm(palmReading, frontPalm, 0, 1000), frontPalm);
+for (let i = 0; i < 144; i++) assert.equal(r.stablePalm(palmReading, backPalm, 1, 1050), null);
+assert.equal(palmReading.count, 1, 'only new images can confirm a palm/dorsum flip');
+assert.equal(r.stablePalm(palmReading, backPalm, 2, 1100), null);
+assert.equal(r.stablePalm(palmReading, backPalm, 3, 1150), backPalm);
+assert.ok(palmReading.speed > 0, 'turning the palm has speed even without wrist translation');
+assert.equal(r.stablePalm(palmReading, null, 4, 1200), null);
+assert.equal(r.stablePalm(palmReading, frontPalm, 5, 1250), null);
+assert.equal(r.stablePalm(palmReading, null, 6, 1300), null);
+assert.equal(r.stablePalm(palmReading, frontPalm, 7, 1350), null);
+assert.equal(palmReading.count, 1, 'dropouts break palm confirmation');
+assert.equal(r.palmFrame(p(0, 1), p(0, 1)), null, 'collapsed knuckles cannot report palm facing');
+const turning = { seq: -1, frame: null, pending: null, count: 0, at: 0, speed: 0 };
+for (let angle = 0; angle <= 540; angle += 15) {
+  const frame = r.palmFrame(p(0, 1), p(Math.cos(rad(angle)), 0, Math.sin(rad(angle))));
+  assert.equal(r.stablePalm(turning, frame, angle, 1000 + angle * 4), frame,
+    'a continuous palm-to-dorsum turn crosses both angular seams without rejection');
+}
+
 // Tiny opposite perturbations near the forearm axis used to request opposite
 // palms. A well-conditioned quarter turn must still be measurable.
 assert.equal(r.twistAngle(p(1, 0), p(0.001, 0, 1), p(0, 0, 1)), null);

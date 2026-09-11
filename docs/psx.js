@@ -4786,7 +4786,10 @@
         vA: ru.position.clone(), vB: ru.position.clone(),
         qA: ru.quaternion.clone(), qB: ru.quaternion.clone(),
         qC: ru.quaternion.clone(), qD: ru.quaternion.clone(),
-        keep: ru.quaternion.clone(), roll: {}, rollReading: {
+        keep: ru.quaternion.clone(), roll: {}, palm: {}, palmRefs: {}, palmReading: {
+          Right: { seq: -1, frame: null, pending: null, count: 0, at: 0, speed: 0 },
+          Left: { seq: -1, frame: null, pending: null, count: 0, at: 0, speed: 0 }
+        }, rollReading: {
           Right: { seq: -1, angle: null, pending: null, count: 0 },
           Left: { seq: -1, angle: null, pending: null, count: 0 }
         }
@@ -4891,16 +4894,41 @@
     }
   }
 
-  // Across the back of the hand, from the little finger to the index. Both
-  // sources have it: the model as two humanoid finger bones, the tracker as two
-  // pose landmarks. Comparing the same anatomical direction on each is what
-  // makes the twist measurable without knowing either rig's axis convention.
+  // Low-poly hands do not always have a separate little-finger bone. Use the
+  // same anatomical pair on the rig AND detector, including the thumb base
+  // when necessary. Changing just one side silently rotates every palm.
+  var PALM_PAIRS = [
+    ['IndexProximal', 'LittleProximal', 5, 17, 'index-little'],
+    ['IndexProximal', 'RingProximal', 5, 13, 'index-ring'],
+    ['MiddleProximal', 'LittleProximal', 9, 17, 'middle-little'],
+    ['ThumbProximal', 'MiddleProximal', 1, 9, 'thumb-middle'],
+    ['ThumbProximal', 'IndexProximal', 1, 5, 'thumb-index'],
+    ['ThumbProximal', 'LittleProximal', 1, 17, 'thumb-little'],
+    ['ThumbProximal', 'Hand', 1, 0, 'thumb-wrist']
+  ];
+
+  function palmReference(vrm, side, mirrored) {
+    var c = armCache(vrm), s = boneSide(side, mirrored);
+    if (!c.palmRefs) return null;
+    if (c.palmRefs[s] !== undefined) return c.palmRefs[s];
+    var hand = boneNode(vrm, s + 'Hand');
+    var origin = hand && worldPos(hand);
+    for (var i = 0; i < PALM_PAIRS.length; i++) {
+      var pair = PALM_PAIRS[i];
+      var a = boneNode(vrm, s + pair[0]), b = boneNode(vrm, s + pair[1]);
+      if (!a || !b) continue;
+      var pa = worldPos(a), pb = worldPos(b);
+      var span = origin ? Math.max(dist3(pa, origin), dist3(pb, origin)) : 0;
+      if (dist3(pa, pb) < Math.max(1e-6, span * 0.05)) continue;
+      return c.palmRefs[s] = { a: a, b: b, ia: pair[2], ib: pair[3], name: pair[4] };
+    }
+    c.palmRefs[s] = null;
+    return null;
+  }
+
   function palmAcross(vrm, side, mirrored) {
-    var s = boneSide(side, mirrored);
-    var ix = boneNode(vrm, s + 'IndexProximal');
-    var li = boneNode(vrm, s + 'LittleProximal');
-    if (!ix || !li) return null;
-    return vnorm(vsub(worldPos(ix), worldPos(li)));
+    var ref = palmReference(vrm, side, mirrored);
+    return ref ? vnorm(vsub(worldPos(ref.a), worldPos(ref.b))) : null;
   }
 
   // A difference between two landmarks, tolerant of a missing z. The hand
@@ -4941,14 +4969,14 @@
   //
   // Null whenever the hand is not being seen, which is often: holistic drops
   // the hand model the moment the hand blurs or leaves the frame.
-  function handWant(side, mb, sx, depth) {
+  function handWant(side, mb, sx, depth, ref) {
     if (!poseHand) return null;
     var p = poseHand[side];
     if (!p || p.length <= HAND_LM.pinky) return null;
     var ib = imageBasis();
     if (!ib) return null;
     var w = p[HAND_LM.wrist], md = p[HAND_LM.middle];
-    var ix = p[HAND_LM.index], pk = p[HAND_LM.pinky];
+    var ix = p[ref ? ref.ia : HAND_LM.index], pk = p[ref ? ref.ib : HAND_LM.pinky];
     if (!w || !md || !ix || !pk) return null;
     var fwd = vnorm(mapDir(lmVec(md, w), ib, mb, sx, depth));
     var across = vnorm(mapDir(lmVec(ix, pk), ib, mb, sx, depth));
@@ -4962,6 +4990,47 @@
     if (!isNum(previous)) return angle;
     var delta = Math.atan2(Math.sin(angle - previous), Math.cos(angle - previous));
     return previous + delta * k;
+  }
+
+  function palmFrame(forward, across) {
+    var f = vnorm(forward), a = f && vnorm(perpTo(across, f));
+    if (!f || !a || vlen(perpTo(across, f)) < 0.15 * vlen(across)) return null;
+    return { fwd: f, across: a, normal: vcross(f, a) };
+  }
+
+  function palmDistance(a, b) {
+    return Math.acos(clamp((vdot(a.fwd, b.fwd) + vdot(a.across, b.across)
+      + vdot(a.normal, b.normal) - 1) * 0.5, -1, 1));
+  }
+
+  // Confirm detector flips in the observed hand frame. The bind-relative roll
+  // also changes when the elbow moves, and cannot tell a flip from that move.
+  function stablePalm(reading, frame, seq, at) {
+    if (reading.seq === seq) return reading.value;
+    reading.seq = seq; reading.value = null;
+    if (!frame) { reading.pending = null; reading.count = 0; return null; }
+    var distance = reading.frame ? palmDistance(reading.frame, frame) : 0;
+    if (distance > Math.PI / 2) {
+      var same = reading.pending && palmDistance(reading.pending, frame) < Math.PI / 6;
+      reading.count = same ? reading.count + 1 : 1;
+      reading.pending = frame;
+      if (reading.count < 3) return null;
+    }
+    var elapsed = (at - reading.at) / 1000;
+    reading.speed = reading.frame && elapsed > 0 && elapsed < 0.5 ? distance / elapsed : 0;
+    reading.at = at; reading.frame = frame; reading.value = frame;
+    reading.pending = null; reading.count = 0;
+    return frame;
+  }
+
+  // Re-express the last visible palm against THIS frame's untwisted hand.
+  // Interpolating yesterday's bind-relative angle invents a palm turn whenever
+  // the forearm changes the zero under it.
+  function palmRollAngle(have, want, axis, previous, k) {
+    var angle = twistAngle(have, want, axis);
+    if (angle == null) return null;
+    var old = previous && twistAngle(have, previous, axis);
+    return old == null ? angle : followRoll(old, angle, k);
   }
 
   // Detector dropouts can replace a detailed palm with contradictory pose
@@ -5089,11 +5158,13 @@
       reach: r2(d.reach),
       straighten: d.bend == null ? null
         : deg(REACH_STRAIGHTEN * Math.pow((1 - d.bend) / 2, 4)),
-      hand: d.hand, twistDeg: deg(d.twist), twistCapped: d.twistCapped,
+      hand: d.hand, handDetected: d.handDetected, twistDeg: deg(d.twist), twistCapped: d.twistCapped,
       palmDot: r2(d.palmDot),
       rollHeld: d.rollHeld, handRest: d.handRest,
       rollSource: d.rollSource, rollRejected: d.rollRejected, rollDeg: deg(d.roll),
       rollDegenerate: d.rollDegenerate, palmError: deg(d.palmError),
+      trackedNormalZ: r2(d.trackedNormalZ), modelNormalZ: r2(d.modelNormalZ),
+      palmSpeed: r2(d.palmSpeed), palmBasis: d.palmBasis,
       imgNear: r2(d.imgNear), occ: d.occ, stand: r2(d.stand),
       waist: r2(d.waist), targetDistance: r2(d.targetDistance),
       lengthAccepted: armLenPass[d.side], wristSource: d.wristSource
@@ -5194,10 +5265,11 @@
     var d = armDbg[side];
     d.live = false; d.reason = ''; d.bend = null; d.want = 0; d.span = 0;
     d.anchor = 0; d.near = null; d.wristSeen = 0; d.upper = 0; d.fore = 0;
-    d.gap = null; d.reach = 1; d.hand = false; d.twist = null;
+    d.gap = null; d.reach = 1; d.hand = false; d.handDetected = false; d.twist = null;
     d.twistCapped = false; d.rollHeld = false; d.handRest = false;
     d.rollSource = 'none'; d.rollRejected = false; d.roll = null;
     d.rollDegenerate = false; d.palmError = null;
+    d.trackedNormalZ = null; d.modelNormalZ = null; d.palmSpeed = 0; d.palmBasis = 'missing';
     d.palmDot = null; d.imgNear = null; d.occ = false; d.stand = 0;
     d.side = side; d.waist = 0; d.targetDistance = 0; d.wristSource = 'pose';
     return d;
@@ -5625,15 +5697,24 @@
     // reads better here than it ever did on the stock rig - but it is a wrist
     // angle inferred from the arm, and the hand model is looking straight at
     // the thing it is measuring.
-    var hw = handWant(side, mb, sx, depth);
+    var palmRef = palmReference(vrm, side, mirrored);
+    dbg.palmBasis = palmRef ? palmRef.name : 'missing';
+    var hw = handWant(side, mb, sx, depth, palmRef);
+    dbg.handDetected = !!hw;
     var hChild = hw ? handChild(vrm, side, mirrored) : null;
+    var observedPalm = hw && palmFrame(hw.fwd, hw.across);
+    var palmReading = c.palmReading[side];
+    var acceptedPalm = stablePalm(palmReading, observedPalm, imgSeq, t);
+    var palmK = instant ? 1 : euroAlpha(dt, palmReading.speed * Math.exp(-Math.max(0, t - palmReading.at) / 150));
+    dbg.palmSpeed = palmReading.speed;
+    if (observedPalm) dbg.trackedNormalZ = vdot(observedPalm.normal, mb.z);
     if (hw && hChild) {
       // Filtered as a direction, on the target's own alpha. The wrist is the
       // noisiest joint in the chain and an unfiltered aim buzzes visibly, but
       // it must not get its own second filter either - that is another lag
       // stacked on the one the target already carries.
-      var hf = hw.fwd;
-      if (!instant && c.aim[side]) hf = vnorm(vlerp(c.aim[side], hf, k)) || hf;
+      var hf = !instant && !acceptedPalm && palmReading.frame ? palmReading.frame.fwd : hw.fwd;
+      if (!instant && c.aim[side]) hf = vnorm(vlerp(c.aim[side], hf, palmK)) || hf;
       c.aim[side] = hf;
       aimBone(c, hand, hChild, hf);
     } else {
@@ -5684,7 +5765,7 @@
     // second time on the rotation - doing that turned every palm the wrong way.
     if (cfg.twist > 0) {
       var wantAcross = hw ? hw.across
-        : (vis(lm[idx.index]) && vis(lm[idx.pinky])
+        : ((!palmRef || palmRef.name === 'index-little') && vis(lm[idx.index]) && vis(lm[idx.pinky])
           ? vnorm(mapDir(vsub(lm[idx.index], lm[idx.pinky]), ub, mb, sx, depth))
           : null);
       var haveAcross = palmAcross(vrm, side, mirrored);
@@ -5698,7 +5779,11 @@
       dbg.rollSource = hw ? 'hand' : (wantAcross ? 'pose' : 'none');
       var rawRoll = ang;
       dbg.rollDegenerate = !!(wantAcross && haveAcross && ang == null);
-      if (!instant) ang = stableRoll(c.rollReading[side], ang, imgSeq);
+      if (!instant) {
+        if (palmAxis) {
+          if (!acceptedPalm) ang = null;
+        } else ang = stableRoll(c.rollReading[side], ang, imgSeq);
+      }
       dbg.rollRejected = rawRoll != null && ang == null;
 
       // Which way the palm ends up facing, against the way the head lies.
@@ -5729,12 +5814,19 @@
         // pronation measurement. An absolute clamp here excludes valid palms
         // on rigs whose bind happens to sit across the atan2 seam.
         ang *= cfg.twist;
-        if (!instant) ang = followRoll(c.roll[side], ang, k);
+        if (!instant) {
+          if (palmAxis) {
+            var weightedAcross = rotAbout(haveAcross, palmAxis, ang);
+            ang = palmRollAngle(haveAcross, weightedAcross, palmAxis, c.palm[side], palmK);
+          } else ang = followRoll(c.roll[side], ang, k);
+        }
         c.roll[side] = ang;
         dbg.roll = ang;
         applyPalmRoll(c, lower, hand, loDir, ang, palmAxis);
       } else if (haveAcross && isNum(c.roll[side])) {
-        dbg.roll = c.roll[side];
+        var heldRoll = palmAxis && c.palm[side] ? twistAngle(haveAcross, c.palm[side], palmAxis) : null;
+        if (heldRoll == null) heldRoll = c.roll[side];
+        dbg.roll = heldRoll;
         // Nothing could read the palm this frame. Both hands up beside the head
         // is the case that does it: they hide each other and the skull, the
         // hand model drops both, and the pose's own knuckles go with them.
@@ -5749,11 +5841,16 @@
         // So hold the last angle that was read, the same answer `coast` gives
         // for an arm that goes out of view. A palm held from a moment ago is
         // right until the wrist turns; a palm at bind is wrong immediately.
-        applyPalmRoll(c, lower, hand, loDir, c.roll[side], palmAxis);
+        applyPalmRoll(c, lower, hand, loDir, heldRoll, palmAxis);
         dbg.rollHeld = true;
       }
       var finalAcross = palmAxis && palmAcross(vrm, side, mirrored);
-      if (finalAcross && wantAcross) dbg.palmError = twistAngle(finalAcross, wantAcross, palmAxis);
+      if (finalAcross && wantAcross) {
+        c.palm[side] = finalAcross;
+        dbg.palmError = twistAngle(finalAcross, wantAcross, palmAxis);
+        var finalPalm = palmFrame(palmAxis, finalAcross);
+        if (finalPalm) dbg.modelNormalZ = vdot(finalPalm.normal, mb.z);
+      }
     }
 
     // what `coast` replays if the next frame cannot see this arm
