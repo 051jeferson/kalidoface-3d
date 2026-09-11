@@ -5223,14 +5223,46 @@
   }
 
   var contactMemo = {
-    Right: { seq: -1, pose: -1, wrist: null, waist: 0 },
-    Left: { seq: -1, pose: -1, wrist: null, waist: 0 }
+    Right: { seq: -1, pose: -1, wrist: null, waist: 0, faceDepth: null, faceWeight: 0 },
+    Left: { seq: -1, pose: -1, wrist: null, waist: 0, faceDepth: null, faceWeight: 0 }
   };
+
+  // Head anchoring treats a hand over the face as a contact gesture. Pose
+  // world-z can place that wrist a whole forearm in front of the skull even
+  // with visibility 1. Use the face plane for the overlapping hand point,
+  // then subtract its wrist-relative depth from the hand detector. Only the
+  // difference is shared: hand z and body z have unrelated origins.
+  // This is contact retargeting, not proof of physical touch from one image.
+  function faceContactDepth(side, lm) {
+    var memo = contactMemo[side];
+    memo.faceWeight = 0;
+    var h = poseHand && poseHand[side], img = poseImg;
+    if (!h || !img || !vis(h[0]) || !vis(img[0]) || !vis(lm[0])
+      || !vis(img[11]) || !vis(img[12]) || !vis(lm[11]) || !vis(lm[12])) return null;
+    var imageSpan = Math.sqrt(imgDist(img[11], img[12]));
+    var worldSpan = dist3(lm[11], lm[12]);
+    if (imageSpan < 0.05 || worldSpan < 1e-4) return null;
+    var limit = faceLim2(), total = 0, depth = 0;
+    if (limit <= 0 || !isNum(h[0].z) || !isNum(lm[0].z)) return null;
+    for (var i = 0; i < HAND_FACE_PTS.length; i++) {
+      var p = h[HAND_FACE_PTS[i]];
+      if (!vis(p) || !isNum(p.z)) continue;
+      var d = imgDist(p, img[0]);
+      // Blend overlapping points rather than switching to whichever finger
+      // is closest this frame. Fade depth anchoring at the face boundary.
+      var w = clamp((1 - d / limit) / 0.75, 0, 1);
+      memo.faceWeight = Math.max(memo.faceWeight, w);
+      total += w; depth += (p.z - h[0].z) * w;
+    }
+    if (total <= 0) return null;
+    return lm[0].z - depth / total * worldSpan / imageSpan;
+  }
 
   function contactReading(side, lm, idx) {
     var m = contactMemo[side];
     if (m.seq === imgSeq && m.pose === poseSeq) return m;
     m.seq = imgSeq; m.pose = poseSeq; m.wrist = null; m.waist = 0;
+    m.faceDepth = null; m.faceWeight = 0;
     var wr = lm[idx.wrist], hr = headRef(lm);
     var near = imgHeadNear(side);
     var weight = sideHitsFace(side) ? 1 : (near == null ? 0
@@ -5242,6 +5274,10 @@
       var original = vsub(wr, hr);
       var recovered = faceWristOffset(side, lm, original);
       if (recovered !== original) m.wrist = vadd(hr, vlerp(original, recovered, weight));
+      if (m.wrist && cfg.headAnchor > 0) {
+        m.faceDepth = faceContactDepth(side, lm);
+        if (m.faceDepth != null) m.wrist.z += (m.faceDepth - m.wrist.z) * weight * cfg.headAnchor * m.faceWeight;
+      }
     }
     if (vis(wr) && vis(lm[11]) && vis(lm[12]) && vis(lm[23]) && vis(lm[24])) {
       m.waist = waistContact(lm, poseImg, idx);
@@ -5307,6 +5343,7 @@
       contact: {
         headScale: r2(d.headScale), headHeight: r2(d.headHeight),
         headReference: d.headReference,
+        depthSource: d.depthSource, poseDepth: r2(d.poseDepth), wristDepth: r2(d.wristDepth),
         headOffset: [r2(d.headX), r2(d.headY), r2(d.headZ)],
         armSpan: r2(span), targetReach: r2(d.targetDistance / span),
         radialMiss: r2(d.radialMiss), weight: r2(d.contactWeight)
@@ -5418,6 +5455,7 @@
     d.side = side; d.waist = 0; d.targetDistance = 0; d.wristSource = 'pose';
     d.headScale = null; d.headHeight = null;
     d.headReference = 'bone';
+    d.depthSource = 'pose'; d.poseDepth = null; d.wristDepth = null;
     d.headX = null; d.headY = null; d.headZ = null;
     d.radialMiss = null; d.contactWeight = 0;
     return d;
@@ -5479,9 +5517,13 @@
     if (live) {
       sh = lm[idx.shoulder]; el = lm[idx.elbow]; wr = lm[idx.wrist];
       contact = contactReading(side, lm, idx);
+      var rawHead = headRef(lm);
+      if (wr && rawHead) dbg.poseDepth = wr.z - rawHead.z;
       // A directly detected hand can recover an occluded pose wrist. The
       // shoulder and elbow must still be visible; this does not invent an arm.
       if (contact.wrist) { wr = contact.wrist; dbg.wristSource = 'hand image'; }
+      if (wr && rawHead) dbg.wristDepth = wr.z - rawHead.z;
+      if (contact.faceDepth != null) dbg.depthSource = 'face contact';
       live = vis(sh) && vis(el) && vis(wr) && worldPoint(sh) && worldPoint(el) && worldPoint(wr);
     }
     // the two trackers disagree about where this person even is

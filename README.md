@@ -742,8 +742,16 @@ the existing offset scale. Models without usable head skin retain the bone
 reference. This is an approximate skull centre, not a surface collision solver.
 `PSX.armInfo().left.contact` (or `.right.contact`) reports the reference, mapped
 head offset, contact weight, target reach and radial miss to distinguish a wrong
-target from an unreachable one. Image overlap alone does not establish contact
-depth, and the current torso contact path covers the waist, not the chest.
+target from an unreachable one. With head anchoring enabled, detected hand
+points overlapping the face are treated as a contact gesture: the face supplies
+their depth plane, and wrist-relative hand depth places the wrist behind or
+ahead of that plane. Overlapping points blend together and the correction fades
+at the face boundary. This avoids following an erroneous body-tracker wrist
+depth, but image overlap alone cannot distinguish touching the face from passing
+a hand in front of it. Setting head anchoring to zero disables this approximation.
+The diagnostic reports `depthSource`, `poseDepth` and `wristDepth`; the two depth
+values are relative to the tracked head. The current torso contact path covers
+the waist, not the chest.
 
 The elbow angle is measured at the elbow, not derived from how far away the hand
 ended up. It is a ratio between two landmark distances, so it does not care how

@@ -128,6 +128,40 @@ const offset = r.faceWristOffset('Right', world, p(-0.15, 0.56, -0.2));
 assert.ok(Math.abs(offset.x + 0.01) < 1e-10);
 assert.ok(Math.abs(offset.y - 0.05) < 1e-10, 'the detected hand, not the pose wrist on the chest, locates the gesture');
 assert.equal(offset.z, -0.2, 'hand-local depth must not replace pose-world depth');
+// A hand resting on the face must not follow a body detector wrist drifting
+// toward the lens. The overlapping fingertip supplies relative hand depth;
+// changing that detector's arbitrary z origin must not move the contact.
+world = pose(); image = pose(); world[15].z = -0.39;
+const contactHand = Array.from({ length: 21 }, () => p(0.5, 0.4, 7));
+contactHand[0] = p(0.5, 0.28, 7);
+contactHand[8] = p(0.5, 0.15, 6.97);
+r.frame(world, image, { Right: contactHand });
+assert.ok(Math.abs(r.faceContactDepth('Right', world) + 0.02) < 1e-10);
+assert.ok(Math.abs(r.contactReading('Right', world, idx).wrist.z + 0.02) < 1e-10,
+  'contact reaches the face plane instead of preserving a 39 cm wrist error');
+const shiftedHand = contactHand.map(v => p(v.x, v.y, v.z + 23));
+r.frame(world, image, { Right: shiftedHand });
+assert.ok(Math.abs(r.faceContactDepth('Right', world) + 0.02) < 1e-10,
+  'body and hand depth origins are never equated');
+r.cfg.headAnchor = 0;
+r.frame(world, image, { Right: contactHand });
+assert.equal(r.contactReading('Right', world, idx).wrist.z, world[15].z,
+  'disabling head anchoring disables contact depth');
+r.cfg.headAnchor = 1;
+const boundaryDepths = [];
+for (const x of [0.564, 0.565, 0.566]) {
+  const boundaryHand = contactHand.map(v => p(v.x, v.y, v.z));
+  boundaryHand[8].x = x;
+  r.frame(world, image, { Right: boundaryHand });
+  boundaryDepths.push(r.contactReading('Right', world, idx).wrist.z);
+}
+assert.ok(Math.abs(boundaryDepths[0] - boundaryDepths[1]) < 0.03,
+  'a fingertip leaving the face fades contact depth rather than snapping back');
+assert.equal(boundaryDepths[2], world[15].z);
+r.frame(world, image, { Right: contactHand.map(v => p(v.x + 0.4, v.y, v.z)) });
+assert.equal(r.faceContactDepth('Right', world), null, 'an unobscured face cannot anchor a distant hand');
+r.frame(world, image, { Right: null });
+assert.equal(r.faceContactDepth('Right', world), null, 'pose overlap without detected hand depth is insufficient');
 // A palm beside the temple does not cover the face, but its directly detected
 // wrist still locates the gesture better than the pose wrist on the chest.
 image = pose(); world = pose();

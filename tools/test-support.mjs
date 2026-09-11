@@ -17,7 +17,7 @@ export function runtime(saved = null, overrides = {}) {
     localStorage: { getItem: () => saved && JSON.stringify(saved), setItem: noop },
     setTimeout: noop, clearTimeout: noop, setInterval: noop });
   const expose = `window.motion = { followRoll, stableRoll, stablePalm, palmFrame, palmRollAngle, rigidPalmFrame, skinBoundsCenter, twistAngle, armLenOk, waistContact,
-    faceWristOffset, imageBasis, contactReading, cfg, armLenSeen,
+    faceWristOffset, faceContactDepth, imageBasis, contactReading, cfg, armLenSeen,
     startMic, stopMic, micLevel, mic, driveVisemes,
     setOccluded: function (value) { faceOcc = value; },
     modelCount: function () { return models.length; }, expected: EXPECTED_HOOKS,
