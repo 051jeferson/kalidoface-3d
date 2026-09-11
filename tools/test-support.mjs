@@ -15,10 +15,13 @@ export function runtime(saved = null, overrides = {}) {
   const context = vm.createContext({ window, document, console,
     navigator: overrides.navigator || { languages: ['en'] }, performance: window.performance,
     localStorage: { getItem: () => saved && JSON.stringify(saved), setItem: noop },
-    setTimeout: noop, clearTimeout: noop, setInterval: noop });
+    setTimeout: noop, clearTimeout: noop, setInterval: noop,
+    requestAnimationFrame: window.requestAnimationFrame });
   const expose = `window.motion = { followRoll, stableRoll, stablePalm, palmFrame, palmRollAngle, rigidPalmFrame, skinBoundsCenter, twistAngle, armLenOk, waistContact,
     faceWristOffset, faceContactDepth, imageBasis, contactReading, cfg, armLenSeen,
-    startMic, stopMic, micLevel, mic, driveVisemes,
+    startMic, stopMic, micLevel, mic, driveVisemes, changeMicDevice, refreshMicDevices,
+    sampleCalibration, captureStep, advanceCalibration, steps, snapshotSettings,
+    micDevices: function () { return micDevices; },
     setOccluded: function (value) { faceOcc = value; },
     modelCount: function () { return models.length; }, expected: EXPECTED_HOOKS,
     frame: function (world, image, hand) {

@@ -68,9 +68,22 @@ the upstream sample avatars and some gallery images still use remote URLs.
 
 In Settings, choose **Microphone assist → Enable microphone**. Capture is off
 on every page load and must be enabled for each session. The camera keeps its
-vowel/rest/smile decisions; volume can reinforce a selected vowel. When a hand
+vowel/rest/smile decisions in **Camera with microphone assist**; volume can reinforce a selected vowel. When a hand
 covers the face, volume drives a generic A mouth instead of holding the last
 vowel. This requires the face update loop and is not audio-only tracking.
+
+Choose **Microphone** to select an input device, or keep **System default**.
+Device names may appear only after enabling capture and granting permission.
+Changing the device while active releases the old stream and opens the chosen
+input. An unavailable selection reports an error instead of using another input.
+
+Under **Mouth control**, choose **Speech from microphone** to let volume alone
+open and close a generic A mouth. Camera vowels no longer drive speech, while
+camera smiles, blinks and brows remain available. Silence frees the mouth for
+the smile; speech takes priority when both share an atlas texture. This mode
+still needs the camera's face update loop. Disabling the microphone returns
+mouth control to the camera. Device, mode and capture apply to this session;
+only microphone sensitivity is saved.
 
 Reduce **Microphone sensitivity** if background noise opens the mouth. This is
 an amplitude detector, not a speech or phoneme recognizer. It does not record,

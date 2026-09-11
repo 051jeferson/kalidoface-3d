@@ -173,6 +173,14 @@ try {
   await page.waitForFunction(() => PSX.mic().state !== 'requesting');
   const micState = await page.evaluate(() => PSX.mic());
   assert.equal(micState.state, 'active', JSON.stringify(micState));
+  const microphone = page.locator('select[name="psx-micDevice"]');
+  await page.waitForFunction(() => document.querySelector('select[name="psx-micDevice"]').options.length > 1);
+  await microphone.selectOption('1');
+  await page.waitForFunction(() => PSX.mic().state === 'active' && testMicStreams.length === 2);
+  assert.equal(await page.evaluate(() => testMicStreams[0].getTracks()[0].readyState), 'ended');
+  await page.locator('select[name="psx-micMode"]').selectOption('1');
+  assert.equal(await page.evaluate(() => PSX.mic().mode), 'speech');
+  assert.ok(await page.getByText('The microphone controls speech;', { exact: false }).isVisible());
   const audioResult = await page.evaluate(async () => {
     const values = {};
     const vrm = { blendShapeProxy: {

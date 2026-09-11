@@ -187,6 +187,8 @@ Never edit `docs/assets/index.*.js` by hand. After a Glitch/Vite rebuild that ch
 
 Working branch is `glitch` (Glitch sync). `origin` is this fork; `upstream` is yeemachine/kalidoface-3d.
 
+Push only to the user's repository: `https://github.com/051jeferson/kalidoface-psx` (`origin`). Never push to yeemachine or `upstream`; upstream is fetch-only. Keep `remote.pushDefault` set to `origin` and the upstream push URL disabled.
+
 Commits: `feat:` / `fix:` plus a short description of the user-visible change.
 
 **Never push unless asked.** The branch is synced to Glitch, so a push deploys. Commit locally and stop there.

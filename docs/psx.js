@@ -89,6 +89,8 @@
     // pre-threshold multiplier, so quiet talking still registers
     mouthGain: 1,
     micSensitivity: 1,
+    micMode: 'assist',
+    micDevice: '',
 
     // --- eyes ----------------------------------------------------------
     // One number: how shut the eye has to look before it counts as shut.
@@ -137,6 +139,7 @@
     // recorded by the mouth wizard: one feature vector per vowel plus a rest
     // pose. null until it has been run, and the vowels fall back to a formula.
     mouth: null,
+    micMouth: null,
     // Run the pose correction at all - the recorded per-pose mapping and the
     // learned ladder both. Off is the plain signal with nothing moving under
     // it, which is what manual tuning needs: a reading that will not be tuned
@@ -316,6 +319,7 @@
     holdMs: { min: 0, max: 400 },
     mouthGain: { min: 0.25, max: 3 },
     micSensitivity: { min: 0.5, max: 4 },
+    micMode: { one: ['assist', 'speech'] },
     eyeShutAt: { min: 0.05, max: 0.95 },
     eyeFurrowLift: { min: 0, max: 0.6 },
     browGain: { min: 0.25, max: 4 },
@@ -381,6 +385,22 @@
   // but the *differences* between them still separate one vowel from another,
   // and a recorded prototype per vowel is what turns that into a decision.
   var MOUTH_DIMS = 7;
+  var MIC_BANDS = [180, 300, 450, 650, 900, 1200, 1550, 1950, 2400, 2900, 3500, 4200, 5000];
+  var MIC_DIMS = MIC_BANDS.length - 1;
+
+  function validMicMouth(v) {
+    if (!v || v.version !== 1 || !isNum(v.noise) || v.noise < 0 || v.noise > 1) return false;
+    for (var i = 0; i < VOWELS.length; i++) {
+      var f = v[VOWELS[i]], sum = 0;
+      if (!Array.isArray(f) || f.length !== MIC_DIMS) return false;
+      for (var j = 0; j < f.length; j++) {
+        if (!isNum(f[j]) || f[j] < 0 || f[j] > 1) return false;
+        sum += f[j] * f[j];
+      }
+      if (sum < 0.5 || sum > 1.5) return false;
+    }
+    return true;
+  }
 
   function isNum(v) { return typeof v === 'number' && isFinite(v); }
 
@@ -392,6 +412,7 @@
 
   function sanitize(key, v) {
     var def = DEFAULTS[key];
+    if (key === 'micMouth') return validMicMouth(v) ? v : null;
     if (key === 'mouth') {
       if (!v || typeof v !== 'object') return null;
       var keys = ['rest'].concat(VOWELS);
@@ -439,6 +460,7 @@
       if (raw) {
         saved = JSON.parse(raw);
         for (var j in DEFAULTS) {
+          if (j === 'micDevice' || j === 'micMode') continue;
           if (saved && Object.prototype.hasOwnProperty.call(saved, j)) out[j] = sanitize(j, saved[j]);
         }
       }
@@ -502,7 +524,7 @@
   function snapshotSettings() {
     var data = {};
     for (var k in DEFAULTS) {
-      if (k === 'preview') continue;
+      if (k === 'preview' || k === 'micDevice' || k === 'micMode') continue;
       data[k] = cfg[k];
     }
     return { kind: EXPORT_KIND, version: EXPORT_VERSION, settings: data };
@@ -575,7 +597,8 @@
   // arrived, or a half-imported profile looks exactly like a whole one.
   var CAL_PARTS = [
     { key: 'cal', name: 'expression calibration' },
-    { key: 'mouth', name: 'vowel calibration' }
+    { key: 'mouth', name: 'vowel calibration' },
+    { key: 'micMouth', name: 'microphone vowel calibration' }
   ];
 
   function applyImported(parsed) {
@@ -586,7 +609,7 @@
     var needsReload = false;
     var bad = {};
     for (var k in DEFAULTS) {
-      if (k === 'preview' || !(k in body)) continue;
+      if (k === 'preview' || k === 'micDevice' || k === 'micMode' || !(k in body)) continue;
       var next = sanitize(k, body[k]);
       // a calibration that did not survive validation is not the same as one
       // the file never had, and only the first is worth telling anyone about
@@ -660,7 +683,9 @@
   }
 
   function save() {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); }
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg, function (key, value) {
+      return key === 'micDevice' || key === 'micMode' ? undefined : value;
+    })); }
     catch (e) { console.warn('[psx] Could not save settings; changes only last for this session.', e); }
   }
 
@@ -1698,7 +1723,7 @@
       // sweep: one depth ratio and one residual per locked arm per inference
       fit: newFit(),
       // mouth: one feature vector per sampled frame
-      feat: []
+      feat: [], audio: [], audioRms: [], audioRead: -1
     };
   }
 
@@ -1741,9 +1766,9 @@
 
   // Per dimension, so one frame where the tracker lost the lip line cannot drag
   // the whole prototype off with it.
-  function medianVec(rows) {
+  function medianVec(rows, dims) {
     var out = [];
-    for (var d = 0; d < MOUTH_DIMS; d++) {
+    for (var d = 0; d < (dims || MOUTH_DIMS); d++) {
       var col = [];
       for (var i = 0; i < rows.length; i++) col.push(rows[i][d]);
       out.push(median(col));
@@ -1786,6 +1811,10 @@
 
   function begin(kind) {
     calRun = { kind: kind, i: 0, phase: 'wait', until: 0, acc: stepAccum(), out: {} };
+    if (kind === 'mouth' && mic.state === 'active') {
+      calRun.micEpoch = mic.epoch;
+      calRun.audio = { version: 1 };
+    }
     if (kind === 'motion') calRun.steps = motionSteps();
     enterWait();
   }
@@ -1951,6 +1980,15 @@
 
     if (calRun.kind === 'mouth') {
       calRun.out[st.key] = medianVec(a.feat);
+      if (calRun.audio && mic.epoch === calRun.micEpoch) {
+        if (st.key === 'rest' && a.audioRms.length >= CAL_MIN_SAMPLES) {
+          calRun.audio.noise = pct(a.audioRms, 0.75);
+        } else if (VOWELS.indexOf(st.key) !== -1 && a.audio.length >= CAL_MIN_SAMPLES) {
+          var af = medianVec(a.audio, MIC_DIMS);
+          normalizeMicFeature(af);
+          calRun.audio[st.key] = af;
+        }
+      }
       nextStep(MOUTH_STEPS.length, finishMouth);
       return;
     }
@@ -2385,11 +2423,26 @@
     }
 
     cfg.mouth = m;
+    var audioSaved = calRun.micEpoch === mic.epoch && validMicMouth(calRun.audio);
+    if (audioSaved) cfg.micMouth = calRun.audio;
     save();
     syncControls();
+    syncMicUi();
 
     var msg = T('Mouth calibrated') + ' - ' + (mouthProtos(m).length - 1) + ' ' +
       T('mouths recorded') + '.';
+    if (audioSaved) {
+      msg += ' ' + T('mic.cal.saved');
+      var similar = [];
+      for (i = 0; i < VOWELS.length; i++) {
+        for (var ai = i + 1; ai < VOWELS.length; ai++) {
+          if (micDistance(cfg.micMouth[VOWELS[i]], cfg.micMouth[VOWELS[ai]]) < 0.025) {
+            similar.push(VOWELS[i].toUpperCase() + '/' + VOWELS[ai].toUpperCase());
+          }
+        }
+      }
+      if (similar.length) msg += ' ' + T('mic.cal.similar') + ' ' + similar.join(', ') + '.';
+    } else if (calRun.audio) msg += ' ' + T('mic.cal.failed');
     if (same.length) {
       msg += ' ' + T('These read almost the same:') + ' ' + same.join(', ') + '. ' +
         T('Redo those, exaggerating the shape and voicing the sound out loud.');
@@ -2633,6 +2686,7 @@
     if (calRun.kind === 'mouth') {
       var f = mouthFeature(rig);
       if (f) a.feat.push(f);
+      sampleMicCalibration(a);
       return;
     }
     a.brow.push(rawBrow);
@@ -3374,7 +3428,9 @@
     if (!proxy || !rig) return;
     if (faceOcc && lastFace) {
       for (var ei = 0; ei < EMOTION_KEYS.length; ei++) {
-        try { proxy.setValue(EMOTION_KEYS[ei], lastFace.out[EMOTION_KEYS[ei]]); } catch (e) {}
+        var held = lastFace.out[EMOTION_KEYS[ei]];
+        if (micSpeech() && mic.level >= SPEECH_AT && emotionFightsMouth(EMOTION_KEYS[ei])) held = 0;
+        try { proxy.setValue(EMOTION_KEYS[ei], held); } catch (e) {}
       }
       paintReadout();
       return;
@@ -3471,6 +3527,7 @@
     var smiling = sm > 0;
     var articulating = lastViseme.key && lastViseme.w >= 0.15 && lastViseme.key !== 'a';
     var talking = mouthLevel(proxy, smiling) >= SPEECH_AT || articulating;
+    if (micSpeech()) talking = mic.level >= SPEECH_AT;
     if (talking) {
       for (var q = 0; q < EMOTION_KEYS.length; q++) {
         if (emotionFightsMouth(EMOTION_KEYS[q])) out[EMOTION_KEYS[q]] = 0;
@@ -3654,10 +3711,126 @@
 
   // Capture is session-only: opening a saved profile never opens a microphone.
   // One fixed buffer, sampled from the existing face loop at most 20 times/s.
-  // No frequency analysis, audio playback, worker or independent polling loop.
+  // Spectral reads are opt-in too: only speech with a recording, or its wizard.
+  // No audio playback, worker or independent polling loop.
   var mic = { state: 'off', epoch: 0, ctx: null, stream: null, track: null, source: null,
-    analyser: null, buffer: null, at: -Infinity, level: 0, reads: 0, ms: 0, error: null };
-  var micButton = null, micNote = null;
+    analyser: null, buffer: null, at: -Infinity, level: 0, reads: 0, ms: 0, error: null,
+    spectrum: null, feature: null, featureOk: false, rms: 0, spectralReads: 0,
+    vowel: '', candidate: '', candidateReads: 0, classified: -1 };
+
+  function normalizeMicFeature(f) {
+    var sum = 0;
+    for (var i = 0; i < f.length; i++) sum += f[i] * f[i];
+    if (sum <= 1e-12) return false;
+    var norm = Math.sqrt(sum);
+    for (var j = 0; j < f.length; j++) f[j] /= norm;
+    return true;
+  }
+
+  function micDistance(a, b) {
+    var sum = 0;
+    for (var i = 0; i < MIC_DIMS; i++) { var d = a[i] - b[i]; sum += d * d; }
+    return sum;
+  }
+
+  function readMicFeature() {
+    mic.analyser.getFloatFrequencyData(mic.spectrum);
+    mic.spectralReads++;
+    var hz = mic.ctx.sampleRate / mic.analyser.fftSize;
+    for (var b = 0; b < MIC_DIMS; b++) {
+      var sum = 0;
+      var from = Math.max(1, Math.ceil(MIC_BANDS[b] / hz));
+      var end = Math.min(mic.spectrum.length, Math.ceil(MIC_BANDS[b + 1] / hz));
+      for (var i = from; i < end; i++) {
+        var db = mic.spectrum[i];
+        if (isNum(db)) sum += Math.pow(10, db / 10);
+      }
+      // Broad, normalized bands reduce dependence on volume and single harmonics.
+      mic.feature[b] = Math.sqrt(sum);
+    }
+    mic.featureOk = normalizeMicFeature(mic.feature);
+  }
+
+  function sampleMicCalibration(a) {
+    if (!calRun.audio || mic.epoch !== calRun.micEpoch || mic.state !== 'active') return;
+    micLevel();
+    if (mic.track.muted || mic.ctx.state !== 'running' || a.audioRead === mic.reads) return;
+    a.audioRead = mic.reads;
+    a.audioRms.push(mic.rms);
+    var noise = isNum(calRun.audio.noise) ? calRun.audio.noise : 0;
+    if (mic.featureOk && mic.rms > Math.max(0.003, noise * 2.5)) {
+      a.audio.push(Array.prototype.slice.call(mic.feature));
+    }
+  }
+
+  function micVowel() {
+    if (mic.level < 0.05) {
+      mic.vowel = mic.candidate = ''; mic.candidateReads = 0;
+      return 'a';
+    }
+    if (!cfg.micMouth || !mic.featureOk) return mic.vowel || 'a';
+    // Render retries cannot confirm a change; only new audio readings can.
+    if (mic.classified === mic.reads) return mic.vowel || 'a';
+    mic.classified = mic.reads;
+    var best = 'a', distance = Infinity;
+    for (var i = 0; i < VOWELS.length; i++) {
+      var key = VOWELS[i], d = micDistance(mic.feature, cfg.micMouth[key]);
+      if (d < distance) { distance = d; best = key; }
+    }
+    if (mic.vowel && micDistance(mic.feature, cfg.micMouth[mic.vowel]) <= distance * (1 + cfg.mouthStick) + 0.005) {
+      best = mic.vowel;
+    }
+    if (best !== mic.candidate) { mic.candidate = best; mic.candidateReads = 0; }
+    mic.candidateReads++;
+    if (!mic.vowel || mic.candidateReads >= 2) mic.vowel = best;
+    return mic.vowel;
+  }
+  var micButton = null, micNote = null, micSelect = null, micModeNote = null;
+  var micDevices = [], micDeviceValues = [''], micListEpoch = 0;
+
+  function micSpeech() {
+    return mic.state === 'active' && cfg.micMode === 'speech' && !calRun && !cfg.preview;
+  }
+
+  function paintMicDevices() {
+    if (!micSelect) return;
+    micDeviceValues.length = 0;
+    micSelect.textContent = '';
+    function option(id, label) {
+      var opt = el('option', STG, label);
+      opt.value = String(micDeviceValues.length);
+      opt.style.color = '#fff'; opt.style.backgroundColor = '#2b2a35';
+      micDeviceValues.push(id); micSelect.appendChild(opt);
+    }
+    option('', T('System default'));
+    micDevices.forEach(function (device, i) {
+      option(device.deviceId, device.label || T('Microphone') + ' ' + (i + 1));
+    });
+    // Keep an unavailable saved device explicit; never silently capture another.
+    if (cfg.micDevice && micDeviceValues.indexOf(cfg.micDevice) < 0) {
+      option(cfg.micDevice, T('Saved microphone (unavailable)'));
+    }
+    micSelect.value = String(micDeviceValues.indexOf(cfg.micDevice));
+  }
+
+  function refreshMicDevices() {
+    var media = navigator.mediaDevices;
+    if (!media || !media.enumerateDevices) return;
+    var epoch = ++micListEpoch;
+    return media.enumerateDevices().then(function (devices) {
+      if (epoch !== micListEpoch) return;
+      micDevices = devices.filter(function (device) {
+        return device.kind === 'audioinput' && device.deviceId;
+      });
+      paintMicDevices();
+    }).catch(function () { /* Capture errors have their own actionable status. */ });
+  }
+
+  function changeMicDevice() {
+    var restart = mic.state === 'active' || mic.state === 'requesting';
+    stopMic();
+    if (restart) return startMic();
+  }
 
   function syncMicUi() {
     if (micButton) {
@@ -3666,6 +3839,10 @@
       micButton.setAttribute('aria-pressed', String(mic.state === 'active'));
     }
     if (micNote) micNote.textContent = T('mic.' + mic.state);
+    if (micModeNote) micModeNote.textContent = T('mic.mode.' + cfg.micMode);
+    if (micModeNote && cfg.micMode === 'speech') {
+      micModeNote.textContent += ' ' + T(cfg.micMouth ? 'mic.cal.ready' : 'mic.cal.needed');
+    }
   }
 
   function stopMic(state) {
@@ -3674,6 +3851,8 @@
     if (mic.source) { try { mic.source.disconnect(); } catch (e) {} }
     if (mic.ctx) { try { mic.ctx.close().catch(function () {}); } catch (e) {} }
     mic.stream = mic.track = mic.source = mic.ctx = mic.analyser = mic.buffer = null;
+    mic.spectrum = mic.feature = null; mic.featureOk = false; mic.rms = 0;
+    mic.vowel = mic.candidate = ''; mic.candidateReads = 0; mic.classified = -1;
     mic.level = 0; mic.at = -Infinity;
     mic.state = state || 'off';
     syncMicUi();
@@ -3686,6 +3865,7 @@
     if (!media || !media.getUserMedia || !AC) { stopMic('unavailable'); return; }
     var epoch = ++mic.epoch;
     mic.state = 'requesting'; mic.reads = 0; mic.ms = 0; mic.error = null;
+    mic.spectralReads = 0;
     syncMicUi();
     function fail(error) {
       if (epoch !== mic.epoch) return;
@@ -3696,9 +3876,10 @@
       // Resume inside the button gesture; permission may take much longer.
       mic.ctx = new AC();
       mic.ctx.resume().catch(fail);
-      return media.getUserMedia({ video: false, audio: { channelCount: 1,
-        echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-      }).then(function (stream) {
+      var audio = { channelCount: 1, echoCancellation: false,
+        noiseSuppression: false, autoGainControl: false };
+      if (cfg.micDevice) audio.deviceId = { exact: cfg.micDevice };
+      return media.getUserMedia({ video: false, audio: audio }).then(function (stream) {
         // A cancelled permission request can still resolve with a live stream.
         if (epoch !== mic.epoch) {
           stream.getTracks().forEach(function (track) { track.stop(); });
@@ -3712,12 +3893,16 @@
           if (epoch === mic.epoch) stopMic('unavailable');
         });
         mic.analyser = mic.ctx.createAnalyser();
-        mic.analyser.fftSize = 512;
+        mic.analyser.fftSize = 2048;
+        mic.analyser.smoothingTimeConstant = 0;
         mic.buffer = new Float32Array(512);
+        mic.spectrum = new Float32Array(1024);
+        mic.feature = new Float32Array(MIC_DIMS);
         mic.source = mic.ctx.createMediaStreamSource(stream);
         mic.source.connect(mic.analyser);
         mic.state = 'active';
         syncMicUi();
+        refreshMicDevices();
       }).catch(fail);
     } catch (error) { fail(error); }
   }
@@ -3726,6 +3911,7 @@
     if (mic.state !== 'active') return 0;
     if (mic.ctx.state !== 'running' || mic.track.muted) {
       mic.level = 0;
+      mic.featureOk = false; mic.rms = 0;
       return 0;
     }
     var t = now();
@@ -3739,19 +3925,32 @@
     // Subtract DC offset so a constant device bias cannot open the mouth.
     var mean = sum / mic.buffer.length;
     var rms = Math.sqrt(Math.max(0, squares / mic.buffer.length - mean * mean));
-    var level = clamp((rms * cfg.micSensitivity - 0.012) / 0.08, 0, 1);
+    mic.rms = rms;
+    var floor = cfg.micMouth && cfg.micMode === 'speech'
+      ? Math.max(0.012, cfg.micMouth.noise * 2.5 * cfg.micSensitivity) : 0.012;
+    var level = clamp((rms * cfg.micSensitivity - floor) / 0.08, 0, 1);
     mic.level += (level - mic.level) * (level > mic.level ? 0.8 : 0.6);
     if (mic.level < 0.01) mic.level = 0;
+    mic.featureOk = false;
+    if ((cfg.micMode === 'speech' && cfg.micMouth && mic.level >= 0.05 && !calRun && !cfg.preview) ||
+        (calRun && calRun.kind === 'mouth' && calRun.micEpoch === mic.epoch && calRun.phase === 'hold')) {
+      readMicFeature();
+    }
     mic.reads++; mic.ms += now() - t;
     return mic.level;
   }
 
   function micInfo() {
     return { state: mic.state, error: mic.error, level: mic.level, reads: mic.reads,
+      mode: cfg.micMode, device: mic.track ? mic.track.label || '' : '',
+      vowel: mic.vowel, calibrated: !!cfg.micMouth, spectralReads: mic.spectralReads,
       maxHz: 20, samplesPerRead: 512, analysisMs: mic.reads ? mic.ms / mic.reads : 0 };
   }
 
   window.addEventListener('pagehide', function () { stopMic(); });
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', refreshMicDevices);
+  }
 
   function driveVisemes(vrm, rig) {
     driveCameraVisemes(vrm, rig);
@@ -3759,11 +3958,11 @@
     var proxy = vrm && vrm.blendShapeProxy;
     if (!proxy || !rig || !rig.mouth) return;
     var level = micLevel();
-    // A visible rest or smile remains the camera's decision. Audio cannot
-    // identify vowels; only an occluded mouth falls back to a generic A cell.
-    if (!faceOcc && (!lastViseme.key || mouthSays > 0)) return;
-    var key = faceOcc ? 'a' : lastViseme.key;
-    var weight = faceOcc ? level : Math.max(lastViseme.w, level);
+    // Assist keeps the camera decision. Speech compares only the audio against
+    // its own recordings; camera prototypes carry no acoustic information.
+    if (!micSpeech() && !faceOcc && (!lastViseme.key || mouthSays > 0)) return;
+    var key = micSpeech() ? micVowel() : faceOcc ? 'a' : lastViseme.key;
+    var weight = micSpeech() || faceOcc ? level : Math.max(lastViseme.w, level);
     for (var k in MOUTH_KEYS) {
       try { proxy.setValue(k, k === key ? weight : 0); } catch (e) {}
     }
@@ -6261,12 +6460,26 @@
   // beside it is evaluated and thrown away.
 
   var PT = {
+    'Microphone': 'Microfone',
+    'System default': 'Padrão do sistema',
+    'Saved microphone (unavailable)': 'Microfone salvo (indisponível)',
+    'Mouth control': 'Controle da boca',
+    'Camera with microphone assist': 'Câmera com apoio do microfone',
+    'Speech from microphone': 'Fala pelo microfone',
+    'mic.mode.assist': 'A câmera escolhe as vogais e o sorriso; o áudio reforça a fala. Ative o microfone para liberar os nomes dos dispositivos.',
+    'mic.mode.speech': 'O microfone controla a fala; a câmera mantém sorriso, olhos e sobrancelhas. Sem microfone ativo, a boca volta à câmera.',
+    'mic.cal.needed': 'Para variar as texturas, ative o microfone e use Calibrar vogais abaixo: fale cada vogal em voz alta. Até gravar os sons, a fala usa só a boca A.',
+    'mic.cal.ready': 'Vogais de áudio calibradas: a textura segue o som mais parecido. Use o mesmo microfone e posição da gravação; ao trocar, calibre novamente.',
+    'mic.cal.saved': 'Sons das cinco vogais gravados para o microfone.',
+    'mic.cal.failed': 'Áudio incompleto: a calibração anterior do microfone foi mantida, se existia. Ative o microfone antes de começar, mantenha o dispositivo e fale as vogais acima do ruído de fundo.',
+    'mic.cal.similar': 'Estes sons ficaram parecidos; grave novamente em um lugar silencioso:',
+    'note.mic.calibration': 'Com o microfone já ativo, esta calibração também grava o som de cada vogal para variar as texturas na fala por áudio. Fique em silêncio no repouso e no sorriso; depois sustente cada vogal em voz alta. As gravações antigas da câmera continuam válidas, mas não contêm áudio.',
     'Microphone assist': 'Apoio do microfone',
     'Microphone sensitivity': 'Sensibilidade do microfone',
     'Enable microphone': 'Ativar microfone',
     'Disable microphone': 'Desativar microfone',
     'Cancel microphone': 'Cancelar microfone',
-    'mic.off': 'Desligado. Ative para reforçar a boca pela voz e animá-la quando a mão cobrir o rosto. A câmera continua escolhendo as vogais e os sorrisos.',
+    'mic.off': 'Microfone desligado. Escolha o controle da boca e ative para usar o áudio nesta sessão. Os nomes dos dispositivos podem aparecer só depois da permissão.',
     'mic.requesting': 'Aguardando permissão do microfone no navegador…',
     'mic.active': 'Microfone ativo nesta sessão. Se a boca reagir ao ruído, reduza a sensibilidade. O áudio é processado aqui, sem gravação ou envio.',
     'mic.denied': 'Permissão negada. Libere o microfone nas permissões do site e tente novamente.',
@@ -6657,12 +6870,26 @@
   };
 
   var EN = {
+    'Microphone': 'Microphone',
+    'System default': 'System default',
+    'Saved microphone (unavailable)': 'Saved microphone (unavailable)',
+    'Mouth control': 'Mouth control',
+    'Camera with microphone assist': 'Camera with microphone assist',
+    'Speech from microphone': 'Speech from microphone',
+    'mic.mode.assist': 'The camera chooses vowels and smiles; audio reinforces speech. Enable the microphone to reveal device names.',
+    'mic.mode.speech': 'The microphone controls speech; the camera keeps smiles, eyes and brows. Without an active microphone, mouth control returns to the camera.',
+    'mic.cal.needed': 'To vary textures, enable the microphone and use Calibrate vowels below: voice each vowel out loud. Until sounds are recorded, speech uses only the A mouth.',
+    'mic.cal.ready': 'Audio vowels calibrated: the texture follows the closest recorded sound. Use the same microphone and position; recalibrate after switching.',
+    'mic.cal.saved': 'All five vowel sounds recorded for the microphone.',
+    'mic.cal.failed': 'Audio incomplete: the previous microphone calibration was kept, if any. Enable the microphone before starting, keep the same device and voice the vowels above background noise.',
+    'mic.cal.similar': 'These sounds were similar; record again in a quiet place:',
+    'note.mic.calibration': 'With the microphone already active, this calibration also captures each vowel sound to vary textures during audio speech. Stay silent for rest and smile, then sustain each vowel out loud. Older camera recordings still work, but contain no audio.',
     'Microphone assist': 'Microphone assist',
     'Microphone sensitivity': 'Microphone sensitivity',
     'Enable microphone': 'Enable microphone',
     'Disable microphone': 'Disable microphone',
     'Cancel microphone': 'Cancel microphone',
-    'mic.off': 'Off. Enable to reinforce the mouth with your voice and animate it when a hand covers your face. The camera still chooses vowels and smiles.',
+    'mic.off': 'Microphone off. Choose mouth control and enable audio for this session. Device names may appear only after permission is granted.',
     'mic.requesting': 'Waiting for microphone permission in the browser…',
     'mic.active': 'Microphone active for this session. Reduce sensitivity if noise moves the mouth. Audio is processed here, without recording or uploading.',
     'mic.denied': 'Permission denied. Allow the microphone in site permissions and try again.',
@@ -7569,6 +7796,8 @@
   }
 
   function liveChange(key) {
+    if (key === 'micDevice') changeMicDevice();
+    if (key === 'micMode') syncMicUi();
     if (NEEDS_RELOAD[key]) {
       pendingReload = true;
       var notes = document.querySelectorAll('.psx-reload-note');
@@ -7849,6 +8078,15 @@
     frag.appendChild(x);
 
     var audio = card(T('Microphone assist'), STG);
+    micSelect = addSelect(audio, 'micDevice', T('Microphone'), micDeviceValues,
+      micDeviceValues.map(function () { return ''; }), STG);
+    paintMicDevices();
+    refreshMicDevices();
+    addSelect(audio, 'micMode', T('Mouth control'), ['assist', 'speech'],
+      [T('Camera with microphone assist'), T('Speech from microphone')], STG);
+    micModeNote = el('div', STG, '');
+    micModeNote.style.cssText = 'width:100%;font-size:12px;line-height:1.5;text-align:left;margin-bottom:12px';
+    audio.appendChild(micModeNote);
     micNote = el('div', STG, '');
     micNote.style.cssText = 'width:100%;font-size:12px;line-height:1.5;text-align:left';
     micNote.setAttribute('role', 'status');
@@ -7948,6 +8186,9 @@
     var mouthNote = el('div', STG, T('note.mouth'));
     mouthNote.style.cssText = 'width:100%;opacity:.5;font-size:12px;margin:0 0 4px;text-align:left';
     em.appendChild(mouthNote);
+    var micCalNote = el('div', STG, T('note.mic.calibration'));
+    micCalNote.style.cssText = 'width:100%;font-size:12px;line-height:1.5;margin:8px 0;text-align:left';
+    em.appendChild(micCalNote);
     addRange(em, 'mouthStick', T('Vowel hold'), 0, 1, 0.05, function (v) { return v.toFixed(2); }, STG);
 
     calMouthEl = el('div', STG, '');
@@ -8148,6 +8389,7 @@
 
   function syncControls() {
     for (var i = 0; i < controls.length; i++) controls[i].sync();
+    syncMicUi();
   }
 
   // The Effects panel has no class of its own we can rely on, but it owns the
@@ -8502,6 +8744,7 @@
     // the old button and the new one would never change.
     calEl = calMotionEl = calMouthEl = calBlinkEl = null;
     readoutEl = eyeReadoutEl = importNoteEl = voiceNoteEl = micButton = micNote = null;
+    micSelect = micModeNote = null;
     calBtn = calMotionBtn = calMouthBtn = calBlinkBtn = null;
     calCancelBtn = calMotionCancelBtn = calMouthCancelBtn = calBlinkCancelBtn = null;
     bgCard = null;
