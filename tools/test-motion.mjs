@@ -6,6 +6,20 @@ const r = runtime();
 const rad = d => d * Math.PI / 180;
 const p = (x, y, z = 0) => ({ x, y, z, visibility: 1 });
 const idx = { shoulder: 11, elbow: 13, wrist: 15, hip: 23 };
+
+// A rigid mitten: broad palm, thin cross-section, and a proximal thumb bulge.
+// No finger bones, hardcoded world axes or side-specific palm signs are needed.
+const mitten = [];
+for (const x of [0, 0.5, 1]) for (const y of [-0.2, 0.2]) for (const z of [-0.04, 0.04]) mitten.push(p(x, y, z));
+for (const x of [0.15, 0.25]) for (const y of [0.35, 0.45]) for (const z of [-0.04, 0.04]) mitten.push(p(x, y, z));
+for (const scale of [0.01, 1, 10]) for (const mirror of [-1, 1]) {
+  const shape = r.rigidPalmFrame(mitten.map(v => p(-v.z * scale, v.x * scale, -v.y * scale * mirror)));
+  assert.ok(shape, 'rigid hands can recover a frame from their bound mesh');
+  assert.ok(shape.fwd.y > 0.999, 'the long distal section locates the fingers');
+  assert.ok(shape.across.z * mirror < -0.999, 'thumb geometry settles the transverse sign on both hands');
+}
+assert.equal(r.rigidPalmFrame([]), null);
+assert.equal(r.rigidPalmFrame(mitten.slice(0, 12)), null, 'a symmetric block cannot establish a thumb side');
 function pose() {
   const a = Array.from({ length: 33 }, () => p(0.5, 0.5));
   a[11] = p(0.3, 0.3); a[12] = p(0.7, 0.3);

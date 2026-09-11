@@ -49,6 +49,11 @@ little-finger bones. `palmBasis` identifies the matched model/detector landmarks
 (including `thumb-wrist` for a thumb-only rig); `missing` means no usable pair
 was found. `handDetected` reports detector availability, while `hand` reports
 whether the model also supports aiming the wrist from a finger bone.
+For rigid hands with no finger bones, the loader measures the hand's bound skin
+vertices once: the distal shape supplies the finger axis, and the palm width
+plus thumb bulge supplies its orientation. These report `palmBasis: rigid-mesh`.
+Round or symmetric shapes without a distinguishable thumb remain unsupported
+instead of receiving a guessed palm direction. No model file is modified.
 The optional `node tools/test-hand-rig.mjs <path-to-playwright/index.mjs>` check
 exercises both hands, bent wrists and different bind rotations with the bundled
 Three.js. It requires an existing Playwright installation and Chromium.

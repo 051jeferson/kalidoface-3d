@@ -4907,6 +4907,102 @@
     ['ThumbProximal', 'Hand', 1, 0, 'thumb-wrist']
   ];
 
+  // A rigid mitten has no finger bones. Its distal vertices give the finger
+  // axis, the broad direction of the palm gives its width, and the proximal
+  // thumb bulge settles which end of that width points toward the thumb.
+  // Reject round/symmetric shapes rather than inventing an anatomical sign.
+  function rigidPalmFrame(points) {
+    if (points.length < 8) return null;
+    var max = 0, i, p;
+    for (i = 0; i < points.length; i++) max = Math.max(max, vlen(points[i]));
+    if (max < 1e-5) return null;
+    var tip = v3(0, 0, 0), count = 0;
+    for (i = 0; i < points.length; i++) {
+      if (vlen(points[i]) >= max * 0.75) { tip = vadd(tip, points[i]); count++; }
+    }
+    var fwd = count && vnorm(tip);
+    if (!fwd) return null;
+    var distal = [], proximal = v3(0, 0, 0), centre = v3(0, 0, 0), pn = 0;
+    for (i = 0; i < points.length; i++) {
+      p = points[i];
+      var along = vdot(p, fwd);
+      if (along > max * 0.35) { distal.push(p); centre = vadd(centre, p); }
+      if (along >= 0 && along < max * 0.4) { proximal = vadd(proximal, p); pn++; }
+    }
+    if (distal.length < 4 || pn < 3) return null;
+    centre = vmul(centre, 1 / distal.length); proximal = vmul(proximal, 1 / pn);
+    var cov = [0, 0, 0, 0, 0, 0], seed = null, longest = 0;
+    for (i = 0; i < distal.length; i++) {
+      p = perpTo(vsub(distal[i], centre), fwd);
+      var length = vlen(p);
+      if (length > longest) { longest = length; seed = p; }
+      cov[0] += p.x * p.x; cov[1] += p.x * p.y; cov[2] += p.x * p.z;
+      cov[3] += p.y * p.y; cov[4] += p.y * p.z; cov[5] += p.z * p.z;
+    }
+    var across = seed && vnorm(seed), variance = 0;
+    if (!across) return null;
+    for (i = 0; i < 24; i++) {
+      p = v3(cov[0] * across.x + cov[1] * across.y + cov[2] * across.z,
+        cov[1] * across.x + cov[3] * across.y + cov[4] * across.z,
+        cov[2] * across.x + cov[4] * across.y + cov[5] * across.z);
+      variance = vdot(p, across);
+      var magnitude = vlen(p);
+      if (magnitude < 1e-16) return null;
+      across = vmul(p, 1 / magnitude);
+    }
+    var other = cov[0] + cov[3] + cov[5] - variance;
+    if (variance < other * 1.5) return null;
+    var thumb = vdot(vsub(proximal, centre), across);
+    var width = Math.sqrt(variance / distal.length);
+    if (Math.abs(thumb) < width * 0.25) return null;
+    if (thumb < 0) across = vmul(across, -1);
+    return { fwd: fwd, across: across, points: points.length };
+  }
+
+  // Read skin bind coordinates, never animated vertices. Each material group
+  // may share the same geometry, so weld duplicate points before measuring.
+  // This runs once at model registration; no mesh scan enters the frame loop.
+  function measureRigidPalm(vrm, hand) {
+    if (!vrm.scene || !vrm.scene.traverse) return null;
+    var points = [], seen = {};
+    vrm.scene.traverse(function (mesh) {
+      if (!mesh.isSkinnedMesh || !mesh.skeleton || !mesh.geometry) return;
+      var joint = mesh.skeleton.bones.indexOf(hand);
+      if (joint < 0) return;
+      var a = mesh.geometry.attributes, pos = a.position, idx = a.skinIndex, weights = a.skinWeight;
+      if (!pos || !idx || !weights) return;
+      var transform = mesh.skeleton.boneInverses[joint].clone().multiply(mesh.bindMatrix);
+      var v = hand.position.clone();
+      for (var i = 0; i < pos.count; i++) {
+        var weight = (idx.getX(i) === joint ? weights.getX(i) : 0)
+          + (idx.getY(i) === joint ? weights.getY(i) : 0)
+          + (idx.getZ(i) === joint ? weights.getZ(i) : 0)
+          + (idx.getW(i) === joint ? weights.getW(i) : 0);
+        if (weight < 0.5) continue;
+        v.fromBufferAttribute(pos, i).applyMatrix4(transform);
+        var key = v.x.toFixed(6) + ',' + v.y.toFixed(6) + ',' + v.z.toFixed(6);
+        if (seen[key]) continue;
+        seen[key] = true; points.push(v3(v.x, v.y, v.z));
+      }
+    });
+    return rigidPalmFrame(points);
+  }
+
+  function measureRigidHands(vrm) {
+    var c = armCache(vrm);
+    if (!c.ok) return;
+    ['Left', 'Right'].forEach(function (side) {
+      if (palmReference(vrm, side, false)) return;
+      var hand = boneNode(vrm, boneSide(side, false) + 'Hand');
+      if (!hand) return;
+      var shape = measureRigidPalm(vrm, hand);
+      if (shape) c.palmRefs[side.toLowerCase()] = {
+        hand: hand, shape: shape, child: { position: shape.fwd },
+        ia: 5, ib: 17, name: 'rigid-mesh'
+      };
+    });
+  }
+
   function palmReference(vrm, side, mirrored) {
     var c = armCache(vrm), s = boneSide(side, mirrored);
     if (!c.palmRefs) return null;
@@ -4928,6 +5024,11 @@
 
   function palmAcross(vrm, side, mirrored) {
     var ref = palmReference(vrm, side, mirrored);
+    if (ref && ref.shape) {
+      var c = armCache(vrm);
+      ref.hand.getWorldQuaternion(c.qB);
+      return vnorm(qRotate(c.qB, ref.shape.across));
+    }
     return ref ? vnorm(vsub(worldPos(ref.a), worldPos(ref.b))) : null;
   }
 
@@ -5120,7 +5221,10 @@
   // back, and there the Euler wrist is still the right answer.
   function handChild(vrm, side, mirrored) {
     var s = boneSide(side, mirrored);
-    return boneNode(vrm, s + 'MiddleProximal') || boneNode(vrm, s + 'IndexProximal');
+    var child = boneNode(vrm, s + 'MiddleProximal') || boneNode(vrm, s + 'IndexProximal');
+    if (child) return child;
+    var ref = palmReference(vrm, side, mirrored);
+    return ref && ref.child || null;
   }
 
   // three.js XYZ order, so the wrist keeps reading the way the stock rig set it
@@ -5765,7 +5869,7 @@
     // second time on the rotation - doing that turned every palm the wrong way.
     if (cfg.twist > 0) {
       var wantAcross = hw ? hw.across
-        : ((!palmRef || palmRef.name === 'index-little') && vis(lm[idx.index]) && vis(lm[idx.pinky])
+        : ((!palmRef || palmRef.name === 'index-little' || palmRef.shape) && vis(lm[idx.index]) && vis(lm[idx.pinky])
           ? vnorm(mapDir(vsub(lm[idx.index], lm[idx.pinky]), ub, mb, sx, depth))
           : null);
       var haveAcross = palmAcross(vrm, side, mirrored);
@@ -7060,6 +7164,7 @@
         if (node.isBone && node.quaternion && !node.__psxRest) restQuat(node);
       });
     }
+    measureRigidHands(vrm);
     if (!vrm.__psxDisposeHook && typeof vrm.dispose === 'function') {
       var dispose = vrm.dispose;
       vrm.__psxDisposeHook = true;
