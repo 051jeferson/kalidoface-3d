@@ -734,6 +734,17 @@ in another space, so there the arms stay on the stock Euler rig. An arm that was
 never solved at all is left to the stock rig from the first frame rather than
 eased into it. Bone lengths are never stretched.
 
+Head contact uses the centre of the head's bound skin volume when available,
+measured once at model registration. A humanoid head joint may sit near the
+neck; using that joint as the counterpart of the tracked ear midpoint places
+the hand too low. The measured reference follows head rotation without changing
+the existing offset scale. Models without usable head skin retain the bone
+reference. This is an approximate skull centre, not a surface collision solver.
+`PSX.armInfo().left.contact` (or `.right.contact`) reports the reference, mapped
+head offset, contact weight, target reach and radial miss to distinguish a wrong
+target from an unreachable one. Image overlap alone does not establish contact
+depth, and the current torso contact path covers the waist, not the chest.
+
 The elbow angle is measured at the elbow, not derived from how far away the hand
 ended up. It is a ratio between two landmark distances, so it does not care how
 big the person is, how far from the lens they are, or what **Reach** is set to —

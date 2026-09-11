@@ -4962,7 +4962,7 @@
   // Read skin bind coordinates, never animated vertices. Each material group
   // may share the same geometry, so weld duplicate points before measuring.
   // This runs once at model registration; no mesh scan enters the frame loop.
-  function measureRigidPalm(vrm, hand) {
+  function boundSkinPoints(vrm, hand) {
     if (!vrm.scene || !vrm.scene.traverse) return null;
     var points = [], seen = {};
     vrm.scene.traverse(function (mesh) {
@@ -4985,7 +4985,40 @@
         seen[key] = true; points.push(v3(v.x, v.y, v.z));
       }
     });
-    return rigidPalmFrame(points);
+    return points;
+  }
+
+  function measureRigidPalm(vrm, hand) {
+    var points = boundSkinPoints(vrm, hand);
+    return points && rigidPalmFrame(points);
+  }
+
+  // The humanoid head joint is often at the neck, not between the ears.
+  // A measured skull interior is the counterpart of headRef's ear midpoint.
+  // Keep this separate from headHeight: moving the reference must not also
+  // magnify the wrist offset or change the user's calibrated scale.
+  function measureHeadCenter(vrm) {
+    var c = armCache(vrm), head = boneNode(vrm, 'head');
+    if (!c.ok || !head) return;
+    var points = boundSkinPoints(vrm, head);
+    var centre = skinBoundsCenter(points);
+    if (centre) {
+      c.headCenter = head.position.clone().set(centre.x, centre.y, centre.z);
+      c.headCenterWorld = head.position.clone();
+    }
+  }
+
+  function skinBoundsCenter(points) {
+    if (!points || points.length < 8) return null;
+    var min = v3(Infinity, Infinity, Infinity), max = v3(-Infinity, -Infinity, -Infinity);
+    for (var i = 0; i < points.length; i++) {
+      var p = points[i];
+      if (!isNum(p.x) || !isNum(p.y) || !isNum(p.z)) return null;
+      min.x = Math.min(min.x, p.x); min.y = Math.min(min.y, p.y); min.z = Math.min(min.z, p.z);
+      max.x = Math.max(max.x, p.x); max.y = Math.max(max.y, p.y); max.z = Math.max(max.z, p.z);
+    }
+    if (Math.min(max.x - min.x, max.y - min.y, max.z - min.z) < 1e-5) return null;
+    return vmid(min, max);
   }
 
   function measureRigidHands(vrm) {
@@ -5271,6 +5304,13 @@
       palmSpeed: r2(d.palmSpeed), palmBasis: d.palmBasis,
       imgNear: r2(d.imgNear), occ: d.occ, stand: r2(d.stand),
       waist: r2(d.waist), targetDistance: r2(d.targetDistance),
+      contact: {
+        headScale: r2(d.headScale), headHeight: r2(d.headHeight),
+        headReference: d.headReference,
+        headOffset: [r2(d.headX), r2(d.headY), r2(d.headZ)],
+        armSpan: r2(span), targetReach: r2(d.targetDistance / span),
+        radialMiss: r2(d.radialMiss), weight: r2(d.contactWeight)
+      },
       lengthAccepted: armLenPass[d.side], wristSource: d.wristSource
     };
   }
@@ -5376,6 +5416,10 @@
     d.trackedNormalZ = null; d.modelNormalZ = null; d.palmSpeed = 0; d.palmBasis = 'missing';
     d.palmDot = null; d.imgNear = null; d.occ = false; d.stand = 0;
     d.side = side; d.waist = 0; d.targetDistance = 0; d.wristSource = 'pose';
+    d.headScale = null; d.headHeight = null;
+    d.headReference = 'bone';
+    d.headX = null; d.headY = null; d.headZ = null;
+    d.radialMiss = null; d.contactWeight = 0;
     return d;
   }
 
@@ -5528,6 +5572,12 @@
       var nose = headRef(lm);
       var uH = vlen(vsub(nose, vmid(lm[ARM_LM.Right.shoulder], lm[ARM_LM.Left.shoulder])));
       var mHead = worldPos(headB);
+      if (c.headCenter) {
+        // worldPos above updates the bone's parent chain before this local
+        // bind-space reference is transformed by the current head pose.
+        mHead = c.headCenterWorld.copy(c.headCenter).applyMatrix4(headB.matrixWorld);
+        dbg.headReference = 'mesh';
+      }
       var mH = headHeight(c, headB);
       var toFace = vsub(wr, nose);
       if (uH > 1e-4 && mH > 1e-4) {
@@ -5608,6 +5658,13 @@
               dbg.stand = stand;
             }
           }
+          // Report the actual target in torso axes, including the depth
+          // standoff. A contact miss can be a bad target or an unreachable
+          // one; the screenshots alone cannot distinguish those cases.
+          dbg.headScale = mH / uH; dbg.headHeight = mH;
+          dbg.headX = vdot(faceOff, mb.x);
+          dbg.headY = vdot(faceOff, mb.y);
+          dbg.headZ = vdot(faceOff, mb.z);
           off = vlerp(off, vsub(vadd(mHead, faceOff), worldPos(upper)), anchorW);
         }
       }
@@ -5628,6 +5685,7 @@
       }
     }
     var contactW = Math.max(anchorW, waistW);
+    dbg.contactWeight = contactW;
     var t = now();
 
     // Mediapipe runs well under the render rate, so most frames re-use a target
@@ -5774,6 +5832,7 @@
     dbg.reach = sideReach(side);
 
     var d = clamp(want, Math.abs(a - b) + 1e-4, a + b - 1e-4);
+    dbg.radialMiss = vlen(toT) - d;
     target = vadd(S, vmul(dir, d));
 
     // law of cosines: how far off the line to the target the upper arm has to
@@ -7165,6 +7224,7 @@
       });
     }
     measureRigidHands(vrm);
+    measureHeadCenter(vrm);
     if (!vrm.__psxDisposeHook && typeof vrm.dispose === 'function') {
       var dispose = vrm.dispose;
       vrm.__psxDisposeHook = true;

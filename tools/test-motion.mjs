@@ -20,6 +20,19 @@ for (const scale of [0.01, 1, 10]) for (const mirror of [-1, 1]) {
 }
 assert.equal(r.rigidPalmFrame([]), null);
 assert.equal(r.rigidPalmFrame(mitten.slice(0, 12)), null, 'a symmetric block cannot establish a thumb side');
+// Repositioning a head joint changes its local skin coordinates, not the
+// skull's physical centre. Material duplicates must not bias the reference.
+const skull = [];
+for (const x of [-0.08, 0.08]) for (const y of [-0.05, 0.21]) for (const z of [-0.13, 0.13]) skull.push(p(x, y, z));
+const skullCentre = r.skinBoundsCenter(skull);
+assert.ok(Math.abs(skullCentre.y - 0.08) < 1e-10, 'a head joint at the neck is not the skull centre');
+const shiftedSkull = skull.map(v => p(v.x - 0.2, v.y + 0.3, v.z - 0.4));
+const shiftedCentre = r.skinBoundsCenter(shiftedSkull.concat(shiftedSkull.slice(0, 3)));
+assert.ok(Math.abs(shiftedCentre.x + 0.2 - skullCentre.x) < 1e-10);
+assert.ok(Math.abs(shiftedCentre.y - 0.3 - skullCentre.y) < 1e-10);
+assert.ok(Math.abs(shiftedCentre.z + 0.4 - skullCentre.z) < 1e-10);
+assert.equal(r.skinBoundsCenter([]), null);
+assert.equal(r.skinBoundsCenter(skull.map(v => p(v.x, v.y, 0))), null, 'flat accessories cannot provide a skull volume');
 function pose() {
   const a = Array.from({ length: 33 }, () => p(0.5, 0.5));
   a[11] = p(0.3, 0.3); a[12] = p(0.7, 0.3);
