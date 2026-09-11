@@ -4875,6 +4875,22 @@
     bone.quaternion.copy(c.qC).multiply(c.qD);
   }
 
+  // A bent wrist has a different longitudinal axis from the forearm. Read
+  // palm roll around the hand, then carry its complete world orientation
+  // through the forearm rotation. Re-aiming from rest after that rotation
+  // loses the palm's orientation, increasingly as the wrist bends.
+  function applyPalmRoll(c, lower, hand, axis, angle, forward) {
+    if (forward) {
+      rollBone(c, hand, forward, angle);
+      hand.getWorldQuaternion(c.keep);
+    }
+    rollBone(c, lower, axis, angle);
+    if (forward) {
+      hand.parent.getWorldQuaternion(c.qB);
+      hand.quaternion.copy(c.qB.invert()).multiply(c.keep);
+    }
+  }
+
   // Across the back of the hand, from the little finger to the index. Both
   // sources have it: the model as two humanoid finger bones, the tracker as two
   // pose landmarks. Comparing the same anatomical direction on each is what
@@ -5013,10 +5029,16 @@
     if (m.seq === imgSeq && m.pose === poseSeq) return m;
     m.seq = imgSeq; m.pose = poseSeq; m.wrist = null; m.waist = 0;
     var wr = lm[idx.wrist], hr = headRef(lm);
-    if (wr && vis(hr) && sideHitsFace(side)) {
+    var near = imgHeadNear(side);
+    var weight = sideHitsFace(side) ? 1 : (near == null ? 0
+      : clamp((IMG_HEAD_FAR - near) / (IMG_HEAD_FAR - IMG_HEAD_ON), 0, 1));
+    // A visible hand beside the head is just as useful as one covering the
+    // nose. Fade recovery with proximity so entering the region cannot snap
+    // an otherwise free arm to a different detector's wrist.
+    if (wr && vis(hr) && weight > 0) {
       var original = vsub(wr, hr);
       var recovered = faceWristOffset(side, lm, original);
-      if (recovered !== original) m.wrist = vadd(hr, recovered);
+      if (recovered !== original) m.wrist = vadd(hr, vlerp(original, recovered, weight));
     }
     if (vis(wr) && vis(lm[11]) && vis(lm[12]) && vis(lm[23]) && vis(lm[24])) {
       m.waist = waistContact(lm, poseImg, idx);
@@ -5071,7 +5093,7 @@
       palmDot: r2(d.palmDot),
       rollHeld: d.rollHeld, handRest: d.handRest,
       rollSource: d.rollSource, rollRejected: d.rollRejected, rollDeg: deg(d.roll),
-      rollDegenerate: d.rollDegenerate,
+      rollDegenerate: d.rollDegenerate, palmError: deg(d.palmError),
       imgNear: r2(d.imgNear), occ: d.occ, stand: r2(d.stand),
       waist: r2(d.waist), targetDistance: r2(d.targetDistance),
       lengthAccepted: armLenPass[d.side], wristSource: d.wristSource
@@ -5175,7 +5197,7 @@
     d.gap = null; d.reach = 1; d.hand = false; d.twist = null;
     d.twistCapped = false; d.rollHeld = false; d.handRest = false;
     d.rollSource = 'none'; d.rollRejected = false; d.roll = null;
-    d.rollDegenerate = false;
+    d.rollDegenerate = false; d.palmError = null;
     d.palmDot = null; d.imgNear = null; d.occ = false; d.stand = 0;
     d.side = side; d.waist = 0; d.targetDistance = 0; d.wristSource = 'pose';
     return d;
@@ -5666,8 +5688,9 @@
           ? vnorm(mapDir(vsub(lm[idx.index], lm[idx.pinky]), ub, mb, sx, depth))
           : null);
       var haveAcross = palmAcross(vrm, side, mirrored);
+      var palmAxis = hw && hChild ? c.aim[side] : null;
       var ang = (wantAcross && haveAcross)
-        ? twistAngle(haveAcross, wantAcross, loDir) : null;
+        ? twistAngle(haveAcross, wantAcross, palmAxis || loDir) : null;
       // what the landmarks asked for, before the limit and the filter get to it
       dbg.hand = !!(hw && hChild);
       dbg.twist = ang;
@@ -5709,9 +5732,7 @@
         if (!instant) ang = followRoll(c.roll[side], ang, k);
         c.roll[side] = ang;
         dbg.roll = ang;
-        rollBone(c, lower, loDir, ang);
-        // the roll turned the forearm, and the hand rode along with it
-        if (hw && hChild) aimBone(c, hand, hChild, c.aim[side]);
+        applyPalmRoll(c, lower, hand, loDir, ang, palmAxis);
       } else if (haveAcross && isNum(c.roll[side])) {
         dbg.roll = c.roll[side];
         // Nothing could read the palm this frame. Both hands up beside the head
@@ -5728,10 +5749,11 @@
         // So hold the last angle that was read, the same answer `coast` gives
         // for an arm that goes out of view. A palm held from a moment ago is
         // right until the wrist turns; a palm at bind is wrong immediately.
-        rollBone(c, lower, loDir, c.roll[side]);
+        applyPalmRoll(c, lower, hand, loDir, c.roll[side], palmAxis);
         dbg.rollHeld = true;
-        if (hw && hChild) aimBone(c, hand, hChild, c.aim[side]);
       }
+      var finalAcross = palmAxis && palmAcross(vrm, side, mirrored);
+      if (finalAcross && wantAcross) dbg.palmError = twistAngle(finalAcross, wantAcross, palmAxis);
     }
 
     // what `coast` replays if the next frame cannot see this arm

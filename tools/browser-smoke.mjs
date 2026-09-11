@@ -127,6 +127,8 @@ try {
   assert.ok(Object.values(rigResult.head.position).every(Number.isFinite));
   assert.ok(rigResult.recovery.success);
   assert.equal(rigResult.recovery.debug.wristSource, 'hand image');
+  assert.ok(typeof rigResult.recovery.debug.palmError === 'number' && Math.abs(rigResult.recovery.debug.palmError) <= 1,
+    'the complete retarget preserves the detected palm with a bent wrist');
   assert.equal(rigResult.palmBefore.rollSource, 'pose');
   assert.equal(rigResult.palmBefore.rollRejected, false);
   assert.equal(rigResult.palmFlip.rollRejected, true, 'an inverted palm must be confirmed');

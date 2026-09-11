@@ -76,6 +76,20 @@ const offset = r.faceWristOffset('Right', world, p(-0.15, 0.56, -0.2));
 assert.ok(Math.abs(offset.x + 0.01) < 1e-10);
 assert.ok(Math.abs(offset.y - 0.05) < 1e-10, 'the detected hand, not the pose wrist on the chest, locates the gesture');
 assert.equal(offset.z, -0.2, 'hand-local depth must not replace pose-world depth');
+// A palm beside the temple does not cover the face, but its directly detected
+// wrist still locates the gesture better than the pose wrist on the chest.
+image = pose(); world = pose();
+for (const i of [15, 17, 19]) image[i] = p(0.3, 0.7);
+world[15] = p(0.3, 0.7, -0.2);
+r.frame(world, image, { Right: [p(0.6, 0.15)] });
+const temple = r.contactReading('Right', world, idx);
+assert.ok(temple.wrist && temple.wrist.y < world[15].y,
+  'visible temple gestures recover without requiring face occlusion');
+assert.equal(temple.wrist.z, world[15].z);
+r.frame(world, image, { Right: null });
+assert.equal(r.contactReading('Right', world, idx).wrist, null, 'missing hands cannot invent a recovery');
+r.frame(world, image, { Right: [p(0.9, 0.7)] });
+assert.equal(r.contactReading('Right', world, idx).wrist, null, 'free gestures keep the world wrist');
 const basis = r.imageBasis();
 const tilted = pose(); tilted[12].y = 0.4;
 r.image(tilted);

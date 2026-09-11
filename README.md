@@ -34,6 +34,13 @@ New profiles animate all fingers. An older profile set to **thumb only** keeps
 that preference: choose **all fingers** under **PSX Hands** for pointing or a
 finger-to-lips gesture. Arm contact now uses head/torso proportions, disables
 prediction at contact and follows palm roll continuously through ±180°.
+Bent wrists preserve the detected palm orientation through forearm rotation.
+Visible hands beside the head also correct the pose detector's wrist position;
+this recovery fades out as the gesture moves away from the head.
+`PSX.armInfo()` reports `palmError` in degrees after the rotation for diagnosis.
+The optional `node tools/test-hand-rig.mjs <path-to-playwright/index.mjs>` check
+exercises both hands, bent wrists and different bind rotations with the bundled
+Three.js. It requires an existing Playwright installation and Chromium.
 
 The [September 2026 audit](AUDIT.md) records fixes, validation and remaining
 hardware/model checks. Offline use requires a previously loaded/uploaded VRM;
