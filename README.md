@@ -985,6 +985,13 @@ and scoped class names, so they look native. Controls are split by what they do:
 - **PSX Hands** — Driven fingers (`all fingers` / `thumb only` / `none`)
 - **Profile** — Export settings, Import settings, Reset PSX settings
 
+Press **H** to hide the whole HUD — the nav, the panels, the side buttons and
+the camera preview — for a clean capture, and **H** again to bring it back. A
+short on-screen note says so the first time. It is not saved: a page that came
+back with no controls and no memory of why would look broken. The key is
+ignored while typing in a field, and the calibration prompt still shows over a
+hidden HUD.
+
 There is no master switch on any of these. A gain whose default is the stock
 value has nothing for one to turn off, and the things that genuinely are not
 preferences — the arm retarget, the pose correction, the adaptive filter — are

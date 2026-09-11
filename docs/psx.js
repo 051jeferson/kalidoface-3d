@@ -6680,6 +6680,8 @@
     'get ready': 'prepare-se',
     'hold': 'segure',
     'Calibration cancelled.': 'Calibração cancelada.',
+    'HUD hidden': 'HUD oculta',
+    'Press H to show it again': 'Pressione H para mostrar de novo',
 
     // --- motion ---
     'Motion Calibration': 'Calibragem de movimento',
@@ -8906,8 +8908,28 @@
       !!t.isContentEditable;
   }
 
+  // H hides the whole HUD - nav, panels, camera preview - for a clean capture.
+  // Session-only on purpose: a page that came back with no visible controls
+  // and no memory of why would look broken, and the key is the only way out.
+  var HUD_OFF = 'psx-hud-off';
+
+  function toggleHud() {
+    var body = document.body;
+    if (!body) return;
+    var off = body.classList.toggle(HUD_OFF);
+    if (off) flashHud(T('HUD hidden'), T('Press H to show it again'));
+    else if (!calRun && hudEl && hudFlashAt) {
+      clearTimeout(hudFlashAt); hudFlashAt = null; hudEl.style.display = 'none';
+    }
+  }
+
   function onCalKey(e) {
     if (typingIn(e.target)) return;
+    if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      toggleHud();
+      return;
+    }
     if (!calRun) {
       if (e.key === 'Escape' && closePanel()) e.preventDefault();
       return;
@@ -8958,7 +8980,14 @@
     // fork does not want touched by hand - the camera is where the capture is
     // framed from and nudging it mid-session silently reframes the shot. The
     // flip control lives inside the same cluster and goes with it.
-    '.cameraMenu{display:none !important}'
+    '.cameraMenu{display:none !important}',
+    // H key: everything the app draws over the scene. The camera preview gets
+    // visibility rather than display so its <video> keeps feeding Mediapipe
+    // exactly as before; the calibration HUD is left alone, it is the one
+    // overlay a run with no panel still needs.
+    'body.psx-hud-off nav.menu,body.psx-hud-off container.subnav,' +
+    'body.psx-hud-off .subButton,body.psx-hud-off .secondaryMenu{display:none !important}',
+    'body.psx-hud-off main>container:not(.scene),body.psx-hud-off #pip{visibility:hidden !important}'
   ].join('');
 
   function injectAppCss() {
